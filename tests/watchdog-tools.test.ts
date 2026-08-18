@@ -36,6 +36,7 @@ function getToolExecutor(mockServer: McpServer, toolName: string): Executor {
 }
 
 function makeBot(overrides: Record<string, unknown> = {}): mineflayer.Bot {
+  const handlers: Record<string, (...args: unknown[]) => void> = {};
   const base: Record<string, unknown> = {
     username: 'primary',
     entity: {
@@ -53,7 +54,16 @@ function makeBot(overrides: Record<string, unknown> = {}): mineflayer.Bot {
     time: { timeOfDay: 6000 },
     isSleeping: false,
     inventory: { items: () => [] },
-    chat: sinon.stub()
+    chat: sinon.stub(),
+    on: (event: string, handler: (...args: unknown[]) => void) => {
+      handlers[event] = handler;
+    },
+    removeListener: (event: string) => {
+      delete handlers[event];
+    },
+    emit: (event: string, ...args: unknown[]) => {
+      if (handlers[event]) handlers[event](...args);
+    }
   };
   return { ...base, ...overrides } as unknown as mineflayer.Bot;
 }
@@ -282,4 +292,97 @@ test.serial('watchdog-status reports state and last trigger', async (t) => {
     clock.restore();
     resetWatchdogForTest();
   }
+});
+
+test.serial('chat event: a player message triggers an interrupt and switches to listen mode', async (t) => {
+  const clock = sinon.useFakeTimers();
+  try {
+    const bot = makeBot();
+    const { mockServer } = setupWithBot(bot);
+    const start = getToolExecutor(mockServer, 'watchdog-start');
+    await start({ events: ['chat'] });
+
+    // Simulate a player writing in chat (background listener fires).
+    (bot as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit('chat', 'Spacecer2', 'come to my house');
+
+    t.true(isInterrupted());
+    const reason = getInterruptReason() ?? '';
+    t.true(reason.includes('PLAYER COMMAND from Spacecer2'));
+    t.true(reason.includes('come to my house'));
+    t.is(watchdog.getMode(), 'listen');
+    t.is(watchdog.triggerCount, 1);
+    t.is(watchdog.lastTrigger!.event, 'chat');
+
+    const read = getToolExecutor(mockServer, 'read-interrupt');
+    const res = await read({});
+    t.true(res.content[0].text.includes('PLAYER COMMAND from Spacecer2'));
+  } finally {
+    clock.restore();
+    resetWatchdogForTest();
+  }
+});
+
+test.serial('chat event: the bot\'s own chat does NOT trigger an interrupt', async (t) => {
+  const clock = sinon.useFakeTimers();
+  try {
+    const bot = makeBot();
+    const { mockServer } = setupWithBot(bot);
+    const start = getToolExecutor(mockServer, 'watchdog-start');
+    await start({ events: ['chat'] });
+
+    // The bot's own username ('primary') broadcasting should be ignored.
+    (bot as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit('chat', 'primary', 'LLM-powered bot ready');
+
+    t.false(isInterrupted());
+    t.is(watchdog.triggerCount, 0);
+    t.is(watchdog.getMode(), 'idle');
+  } finally {
+    clock.restore();
+    resetWatchdogForTest();
+  }
+});
+
+test.serial('chat event does not fire when chat is not enabled', async (t) => {
+  const clock = sinon.useFakeTimers();
+  try {
+    const bot = makeBot();
+    const { mockServer } = setupWithBot(bot);
+    const start = getToolExecutor(mockServer, 'watchdog-start');
+    await start({ events: ['low-health'] }); // chat NOT enabled
+
+    (bot as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit('chat', 'Spacecer2', 'hello');
+
+    t.false(isInterrupted());
+    t.is(watchdog.triggerCount, 0);
+  } finally {
+    clock.restore();
+    resetWatchdogForTest();
+  }
+});
+
+test.serial('watchdog-listen enables background chat listening and switches to listen mode', async (t) => {
+  const bot = makeBot();
+  const { mockServer } = setupWithBot(bot);
+  const listen = getToolExecutor(mockServer, 'watchdog-listen');
+  const res = await listen({});
+
+  t.true(res.content[0].text.includes('listening for player chat'));
+  t.is(watchdog.getMode(), 'listen');
+  t.true(watchdog.enabledEvents.has('chat'));
+
+  // A subsequent player message now interrupts.
+  (bot as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit('chat', 'Spacecer2', 'stop building');
+  t.true(isInterrupted());
+  const reason = getInterruptReason() ?? '';
+  t.true(reason.includes('stop building'));
+});
+
+test.serial('listen tool reports background listening is active', async (t) => {
+  const bot = makeBot();
+  const { mockServer } = setupWithBot(bot);
+  const listen = getToolExecutor(mockServer, 'listen');
+  const res = await listen({});
+
+  t.true(res.content[0].text.includes('Listening for player chat'));
+  t.is(watchdog.getMode(), 'listen');
 });

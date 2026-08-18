@@ -118,6 +118,47 @@ export function registerWatchdogTools(factory: ToolFactory, getBot: () => Bot): 
   );
 
   factory.registerTool(
+    "watchdog-listen",
+    "Start CONTINUOUS BACKGROUND listening for player chat. When the player (human) writes in chat, it INSTANTLY interrupts the current action, switches to 'listen' mode, and injects a directive (read via read-interrupt) so the agent stops and responds to the player. Runs in parallel with everything else — no polling needed.",
+    {
+      respond: z.boolean().optional().describe("When true, also immediately echo a ready message in chat (default false)")
+    },
+    async ({ respond }) => {
+      const bot = getBot();
+      watchdog.setBot(bot);
+      watchdog.enableEvent('chat');
+      watchdog.attachChatListener();
+      watchdog.setMode('listen');
+      if (respond) {
+        try {
+          bot.chat('[listen] I am listening for your commands.');
+        } catch {
+          // best-effort
+        }
+      }
+      return factory.createResponse(
+        `Now listening for player chat in the background (mode: listen). ` +
+        `Player messages will interrupt the current action — read them via read-interrupt.`
+      );
+    }
+  );
+
+  factory.registerTool(
+    "listen",
+    "Listen for the next player chat message. Returns immediately if a directive is already pending; otherwise reports that listening is active (the background chat listener will inject a directive when the player speaks). Use read-interrupt to consume the message.",
+    {
+      timeoutSeconds: z.coerce.number().optional().describe("How long to listen (default 60, max 600)")
+    },
+    async () => {
+      watchdog.attachChatListener();
+      watchdog.setMode('listen');
+      return factory.createResponse(
+        'Listening for player chat in the background. A player message will interrupt and inject a directive via read-interrupt.'
+      );
+    }
+  );
+
+  factory.registerTool(
     "set-mode",
     "Manually set the watchdog mode (e.g. mining, building, defense).",
     {

@@ -24,7 +24,7 @@ import { isHostileEntity, iterateEntities, distanceToEntity } from './tools/enti
 
 export const EVENT_NAMES = [
   'hostile', 'creeper', 'fall', 'void', 'lava', 'low-health', 'hunger',
-  'on-fire', 'night', 'drowning', 'inventory-full'
+  'on-fire', 'night', 'drowning', 'inventory-full', 'chat'
 ] as const;
 
 export type WatchdogEvent = (typeof EVENT_NAMES)[number];
@@ -34,6 +34,12 @@ const EVENT_PRIORITY: WatchdogEvent[] = [
   'void', 'on-fire', 'creeper', 'fall', 'drowning', 'lava', 'hostile',
   'low-health', 'hunger', 'night', 'inventory-full'
 ];
+
+/**
+ * Event-driven (non-polled) events. `chat` is handled by a background listener
+ * attached to the bot's 'chat' event, NOT by the polled tick loop — so a player
+ * writing in chat interrupts instantly, in parallel with the agent's actions.
+ */
 
 /** The mode the watchdog switches to when each event fires. */
 const EVENT_MODES: Record<string, string> = {
@@ -47,7 +53,8 @@ const EVENT_MODES: Record<string, string> = {
   'on-fire': 'fire-emergency',
   night: 'sleep',
   drowning: 'surface',
-  'inventory-full': 'inventory'
+  'inventory-full': 'inventory',
+  chat: 'listen'
 };
 
 type Entity = ReturnType<Bot['nearestEntity']>;
@@ -88,9 +95,16 @@ export class Watchdog {
   thresholds: Record<string, number> = {};
   listener: WatchdogListener | null = null;
   private bot: Bot | null = null;
+  /** Bound background chat handler (player -> interrupt). */
+  private chatHandler: ((username: string, message: string) => void) | null = null;
+  /** Whether the background chat listener is attached. */
+  private chatListening = false;
 
   setBot(bot: Bot): void {
+    // Re-attach the chat listener if it was active on the previous bot.
+    const wasListening = this.chatListening;
     this.bot = bot;
+    if (wasListening) this.attachChatListener();
   }
 
   setListener(listener: WatchdogListener | null): void {
@@ -119,11 +133,53 @@ export class Watchdog {
     }
     this.running = true;
     this.startTimer();
+    // The chat listener runs in the background (parallel) and interrupts on
+    // player chat; attach it whenever 'chat' is enabled.
+    if (this.enabledEvents.has('chat')) this.attachChatListener();
   }
 
   stopWatchdog(): void {
     this.clearTimer();
     this.running = false;
+    this.detachChatListener();
+  }
+
+  /**
+   * Attach the background chat listener so a player's chat message interrupts
+   * the agent instantly (mode -> 'listen'), running in parallel with the
+   * polled tick loop. Idempotent. Only reacts to messages from other players
+   * (not the bot's own broadcasts).
+   */
+  attachChatListener(): void {
+    const bot = this.bot;
+    if (!bot || this.chatListening) return;
+    this.chatListening = true;
+    this.chatHandler = (username: string, message: string) => {
+      if (this.isSelfChat(username)) return;
+      if (!this.enabledEvents.has('chat')) return;
+      this.trigger('chat', `PLAYER COMMAND from ${username}: "${message}" — CANCEL current action; switch to LISTEN mode and respond to the player.`);
+    };
+    // The bot emits 'chat' with (username, message) for every inbound chat.
+    bot.on('chat', this.chatHandler);
+  }
+
+  /** Detach the background chat listener (idempotent). */
+  detachChatListener(): void {
+    const bot = this.bot;
+    if (this.chatHandler) {
+      try {
+        bot?.removeListener('chat', this.chatHandler);
+      } catch {
+        // best-effort
+      }
+      this.chatHandler = null;
+    }
+    this.chatListening = false;
+  }
+
+  private isSelfChat(username: string): boolean {
+    const bot = this.bot;
+    return Boolean(bot && bot.username && username === bot.username);
   }
 
   resumeWatchdog(): void {
@@ -137,6 +193,18 @@ export class Watchdog {
 
   setMode(mode: string): void {
     this.mode = mode;
+  }
+
+  /** Enable a watchdog event (e.g. 'chat'). Attaches the chat listener for event-driven events. */
+  enableEvent(event: string): void {
+    this.enabledEvents.add(event);
+    if (event === 'chat') this.attachChatListener();
+  }
+
+  /** Disable a watchdog event. Detaches the chat listener if it was the last reason to keep it. */
+  disableEvent(event: string): void {
+    this.enabledEvents.delete(event);
+    if (event === 'chat' && !this.enabledEvents.has('chat')) this.detachChatListener();
   }
 
   getMode(): string {
@@ -156,6 +224,7 @@ export class Watchdog {
   /** Reset all state (timer, mode, triggers, bot ref, interrupt) for test isolation. */
   resetForTest(): void {
     this.stopWatchdog();
+    this.detachChatListener();
     this.mode = 'idle';
     this.prevMode = null;
     this.intervalMs = 500;
