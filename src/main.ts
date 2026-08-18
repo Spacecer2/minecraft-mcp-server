@@ -33,6 +33,10 @@ import { registerContainerTools } from './tools/container-tools.js';
 import { registerQATools } from './tools/qa-tools.js';
 import { registerRedstoneBuildTools } from './tools/redstone-build.js';
 import { registerBlueprintStoreTools } from './tools/blueprint-store.js';
+import { registerCombatTools } from './tools/combat-tools.js';
+import { registerFarmingTools } from './tools/farming-tools.js';
+import { registerMotionTools } from './tools/motion-tools.js';
+import { registerVisionTools } from './tools/vision-tools.js';
 import { z } from "zod";
 import * as fs from 'node:fs';
 
@@ -168,6 +172,10 @@ async function main() {
   registerQATools(factory, getBot);
   registerRedstoneBuildTools(factory, getBot);
   registerBlueprintStoreTools(factory);
+  registerCombatTools(factory, getBot);
+  registerFarmingTools(factory, getBot);
+  registerMotionTools(factory, getBot);
+  registerVisionTools(factory, getBot);
 
   process.stdin.on('end', () => {
     manager.cleanup();
