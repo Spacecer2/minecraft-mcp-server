@@ -22,6 +22,11 @@ import { registerMemoryTools } from './tools/memory-tools.js';
 import { registerBuildTools } from './tools/build-tools.js';
 import { registerNavigationTools } from './tools/navigation-tools.js';
 import { registerCoordinationTools } from './tools/coordination-tools.js';
+import { registerTemplateTools } from './tools/template-registry.js';
+import { registerPlanTools } from './tools/plan-tools.js';
+import { registerPerceptionTools } from './tools/perception-tools.js';
+import { registerGatherTools } from './tools/gather-tools.js';
+import { registerBlueprintTools } from './tools/blueprint-tools.js';
 import { z } from "zod";
 import * as fs from 'node:fs';
 
@@ -146,6 +151,11 @@ async function main() {
   registerBuildTools(factory, getBot);
   registerNavigationTools(factory, getBot);
   registerCoordinationTools(factory, manager);
+  registerTemplateTools(factory);
+  registerPlanTools(factory, getBot);
+  registerPerceptionTools(factory, getBot);
+  registerGatherTools(factory, getBot);
+  registerBlueprintTools(factory, getBot);
 
   process.stdin.on('end', () => {
     manager.cleanup();
