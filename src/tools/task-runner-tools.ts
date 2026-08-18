@@ -8,7 +8,7 @@ import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { checkInterrupt, isInterruptError, getInterruptReason } from '../interrupt.js';
 import { GoalContext, GoalStep, GoalStepResult, GoalSpec, WeightedFallback, pickBestFallback } from '../goal-core.js';
-import { orchestrateGoal } from '../goal-orchestrator.js';
+import { startGoalRun, statusOf, resolveRun, abortRun, resetGoalRuns, type GoalTask } from '../goal-runner.js';
 import { estimateDistance, estimateRiskNearby, safeInput } from '../utility.js';
 import * as gatherTools from './gather-tools.js';
 import {
@@ -110,12 +110,24 @@ let lastTaskId = 0;
 export function resetTaskRuns(): void {
   taskRuns.clear();
   lastTaskId = 0;
+  resetGoalRuns();
 }
 
 function resolveTask(id?: number): TaskRun | undefined {
   if (id !== undefined) return taskRuns.get(id);
   if (lastTaskId > 0) return taskRuns.get(lastTaskId);
   return undefined;
+}
+
+/** Resolve a task id to either a build TaskRun (via goal-runner carve-out) or a background goal. */
+function resolveAnyTask(id?: number): TaskRun | GoalTask | undefined {
+  const goal = statusOf(id);
+  if (goal && goal.spec.steps.length === 1 && goal.spec.steps[0].name === 'build') {
+    const buildTask = resolveTask(id);
+    if (buildTask) return buildTask;
+  }
+  if (goal) return goal;
+  return resolveTask(id);
 }
 
 function countItemInInventory(bot: mineflayer.Bot, itemName: string): number {
@@ -1042,28 +1054,51 @@ export function gatherItemStep(itemName: string, count: number): GoalStep {
   };
 }
 
+/** Synchronously compute the ordered block plan for a template (shared by run-goal and buildStep). */
+export function computeBuildPlan(opts: {
+  templateName: string;
+  anchor: { x: number; y: number; z: number };
+  w?: number;
+  d?: number;
+}): { ok: true; steps: TaskStep[]; stages: TaskStage[] } | { ok: false; error: string } {
+  try {
+    const layout = generateTemplate(opts.templateName, { w: opts.w, d: opts.d });
+    const built = buildSteps(layout, opts.anchor, resolvePalette());
+    return { ok: true, steps: built.steps, stages: built.stages };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `failed to build plan for ${opts.templateName}: ${err instanceof Error ? err.message : String(err)}`
+    };
+  }
+}
+
 /** Create a build plan using the existing template + buildSteps machinery. */
 export function buildStep(opts: {
   templateName: string;
   anchor: { x: number; y: number; z: number };
   w?: number;
   d?: number;
+  taskId?: number;
 }): GoalStep {
   return {
     name: 'build',
     run: async (_ctx: GoalContext): Promise<GoalStepResult> => {
-      let steps: TaskStep[] = [];
-      let stages: TaskStage[] = [];
-      try {
-        const layout = generateTemplate(opts.templateName, { w: opts.w, d: opts.d });
-        const built = buildSteps(layout, opts.anchor, resolvePalette());
-        steps = built.steps;
-        stages = built.stages;
-      } catch (err) {
+      // If run-goal pre-created a TaskRun for this id, the background loop just
+      // reports the start; the user advances the build with run-task-step.
+      if (opts.taskId !== undefined && taskRuns.has(opts.taskId)) {
+        return {
+          status: 'done',
+          report: `Started build goal ${opts.taskId}: building ${opts.templateName} at (${opts.anchor.x},${opts.anchor.y},${opts.anchor.z}). Execute with task-run-status / run-task-step.`
+        };
+      }
+
+      const built = computeBuildPlan(opts);
+      if (!built.ok) {
         return {
           status: 'blocked',
           intensity: 3,
-          reason: `failed to build plan for ${opts.templateName}: ${err instanceof Error ? err.message : String(err)}`,
+          reason: built.error,
           context: { template: opts.templateName }
         };
       }
@@ -1077,8 +1112,8 @@ export function buildStep(opts: {
         planId: id,
         template: opts.templateName,
         anchor: opts.anchor,
-        steps,
-        progress: `0/${steps.length} blocks placed (stage: ${stages[0] ?? 'none'})`
+        steps: built.steps,
+        progress: `0/${built.steps.length} blocks placed (stage: ${built.stages[0] ?? 'none'})`
       });
       return {
         status: 'done',
@@ -1104,7 +1139,12 @@ export interface GoalPlanOpts {
 }
 
 export type GoalPlan =
-  | { ok: true; steps: GoalStep[]; goalName: string }
+  | {
+      ok: true;
+      steps: GoalStep[];
+      goalName: string;
+      build?: { templateName: string; anchor: { x: number; y: number; z: number }; w?: number; d?: number };
+    }
   | { ok: false; error: string };
 
 /**
@@ -1145,7 +1185,8 @@ export function planGoal(text: string, opts: GoalPlanOpts): GoalPlan {
     return {
       ok: true,
       goalName: `build ${templateName}`,
-      steps: [buildStep({ templateName, anchor, w: opts.w, d: opts.d })]
+      steps: [buildStep({ templateName, anchor, w: opts.w, d: opts.d })],
+      build: { templateName, anchor, w: opts.w, d: opts.d }
     };
   }
 
@@ -1252,7 +1293,7 @@ export function planGoal(text: string, opts: GoalPlanOpts): GoalPlan {
 export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
   factory.registerTool(
     "run-goal",
-    "Start a multi-step goal with one command. Builds a deterministic plan and executes it step-by-step. Supports 'build <template>', 'collect <n> <item>', 'harvest <crop>', 'drop me some bread' (deliver / make bread), and compound goals like 'get some crops and drop me some bread'. If the plan blocks with no deterministic fallback it returns a BLOCKED/NEED_DECISION response with context. Track build progress with run-task-status and advance builds with run-task-step.",
+    "Start a multi-step goal in the background with one command. Builds a deterministic plan and returns immediately with 'Started goal #<id>'. The goal auto-advances step-by-step; poll run-task-status for progress and advance builds with run-task-step. Supports 'build <template>', 'collect <n> <item>', 'harvest <crop>', 'drop me some bread' (deliver / make bread), and compound goals like 'get some crops and drop me some bread'. The goal pauses for your input when it blocks with no deterministic fallback (resolve with resolve-task).",
     {
       goal: z.string().describe("Goal to run, e.g. 'build a cottage', 'collect 32 wood', 'drop me some bread'"),
       template: z.string().optional().describe("Template name for build goals (default: house, or the template named in the goal)"),
@@ -1261,11 +1302,12 @@ export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mine
       z: z.coerce.number().optional().describe("Anchor Z for build goals (default: current bot position)"),
       w: z.coerce.number().optional().describe("Template width override"),
       d: z.coerce.number().optional().describe("Template depth override"),
-      target: z.coerce.number().int().optional().describe("Gather target count (overrides the count parsed from the goal)")
+      target: z.coerce.number().int().optional().describe("Gather target count (overrides the count parsed from the goal)"),
+      autoAdvanceMs: z.coerce.number().int().optional().describe("Milliseconds between background goal steps (default: 1200)")
     },
-    async ({ goal, template, x, y, z, w, d, target }: {
+    async ({ goal, template, x, y, z, w, d, target, autoAdvanceMs = 1200 }: {
       goal: string, template?: string, x?: number, y?: number, z?: number,
-      w?: number, d?: number, target?: number
+      w?: number, d?: number, target?: number, autoAdvanceMs?: number
     }) => {
       const text = goal.trim().toLowerCase();
       const bot = getBot();
@@ -1275,22 +1317,51 @@ export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mine
         return factory.createErrorResponse(plan.error);
       }
 
-      const spec: GoalSpec = { name: plan.goalName, steps: plan.steps };
-      // run-goal is the PARENT: it delegates the goal to the orchestrator, which
-      // guards with the watchdog (parent-of-all safety) and runs the child plan.
-      const outcome = await orchestrateGoal(bot, spec);
-
-      if (outcome.status === 'watchdog-paused') {
-        return factory.createErrorResponse(outcome.report);
+      let built: ReturnType<typeof computeBuildPlan> | undefined;
+      let spec: GoalSpec;
+      if (plan.build) {
+        built = computeBuildPlan(plan.build);
+        if (!built.ok) {
+          return factory.createErrorResponse(built.error);
+        }
+        // Build goals start with an empty spec; the goal task's spec is populated
+        // synchronously after startGoalRun (the runner sleeps before its first step).
+        spec = { name: plan.goalName, steps: [] };
+      } else {
+        spec = { name: plan.goalName, steps: plan.steps };
       }
 
-      if (outcome.status === 'blocked' && outcome.needDecision) {
-        return factory.createResponse(
-          `BLOCKED: ${outcome.needDecision.reason}. Context: ${JSON.stringify(outcome.needDecision.context)}. Direct me (front brain) or call watchdog-resume to continue.`
-        );
+      const goalId = startGoalRun(bot, spec, plan.goalName, autoAdvanceMs);
+      if (goalId < 0) {
+        return factory.createErrorResponse('Bot is not available to start the goal.');
       }
 
-      return factory.createResponse(outcome.report);
+      if (plan.build && built && built.ok) {
+        const task: TaskRun = {
+          id: goalId,
+          kind: 'build',
+          description: `build ${plan.build.templateName} at (${plan.build.anchor.x},${plan.build.anchor.y},${plan.build.anchor.z})`,
+          status: 'running',
+          planId: goalId,
+          template: plan.build.templateName,
+          anchor: plan.build.anchor,
+          steps: built.steps,
+          progress: `0/${built.steps.length} blocks placed (stage: ${built.stages[0] ?? 'none'})`
+        };
+        taskRuns.set(goalId, task);
+        lastTaskId = goalId;
+        const goalTask = statusOf(goalId);
+        if (goalTask) {
+          goalTask.spec = {
+            name: plan.goalName,
+            steps: [buildStep({ ...plan.build, taskId: goalId })]
+          };
+        }
+      }
+
+      return factory.createResponse(
+        `Started goal #${goalId}: ${plan.goalName}. Running in the background (auto-advances step-by-step). Poll run-task-status for progress; it will pause for your input on BLOCKED/NEED_DECISION (resolve with resolve-task). Watchdog can pause it — resume with watchdog-resume.`
+      );
     }
   );
 
@@ -1301,7 +1372,7 @@ export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mine
       id: z.coerce.number().int().optional().describe("Task-run id (defaults to the last created task)")
     },
     async ({ id }: { id?: number }) => {
-      const task = resolveTask(id);
+      const task = resolveAnyTask(id);
       if (!task) {
         return factory.createErrorResponse('No task-run found. Start one with run-goal.');
       }
@@ -1309,7 +1380,7 @@ export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mine
       const lines = [
         `Task ${task.id}: ${task.description}`,
         `Status: ${task.status}`,
-        `Progress: ${buildProgress(task)}`
+        `Progress: ${'kind' in task ? buildProgress(task) : (task.lastReport ?? '')}`
       ];
       if (task.error) {
         lines.push(`Error: ${task.error}`);
@@ -1326,11 +1397,11 @@ export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mine
       steps: z.coerce.number().int().optional().describe("Max blocks to place this call (default: 5)")
     },
     async ({ id, steps = 5 }: { id?: number, steps?: number }) => {
-      const task = resolveTask(id);
+      const task = resolveAnyTask(id);
       if (!task) {
         return factory.createErrorResponse('No task-run found. Start one with run-goal.');
       }
-      if (task.kind !== 'build' || !task.steps) {
+      if (!('kind' in task) || task.kind !== 'build' || !task.steps) {
         return factory.createResponse(`Task ${task.id} is not a build goal.`);
       }
 
@@ -1393,18 +1464,42 @@ export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mine
       id: z.coerce.number().int().optional().describe("Task-run id (defaults to the last created task)")
     },
     async ({ id }: { id?: number }) => {
-      const task = resolveTask(id);
+      abortRun(id);
+      const task = resolveAnyTask(id);
       if (!task) {
         return factory.createErrorResponse(
           id !== undefined ? `Task ${id} not found.` : 'No task-run found. Start one with run-goal.'
         );
       }
-      task.status = 'failed';
-      task.error = 'aborted by user';
-      task.planId = undefined;
-      task.steps = undefined;
-      task.progress = 'aborted';
+      if ('kind' in task) {
+        task.status = 'failed';
+        task.error = 'aborted by user';
+        task.planId = undefined;
+        task.steps = undefined;
+        task.progress = 'aborted';
+      }
       return factory.createResponse(`Task ${task.id} aborted.`);
+    }
+  );
+
+  factory.registerTool(
+    "resolve-task",
+    "Resolve a blocked background goal that is waiting for your input. Pass the instruction/direction and the goal resumes on its next step.",
+    {
+      id: z.coerce.number().int().optional().describe("Goal task id (defaults to the last created goal)"),
+      instruction: z.string().describe("Your instruction/direction for the blocked goal")
+    },
+    async ({ id, instruction }: { id?: number, instruction: string }) => {
+      const goal = statusOf(id);
+      if (!goal) {
+        return factory.createErrorResponse(
+          id !== undefined ? `Goal #${id} not found.` : 'No goal task found.'
+        );
+      }
+      if (goal.status !== 'awaiting-decision') {
+        return factory.createErrorResponse(`Goal #${goal.id} is not awaiting a decision (status: ${goal.status}).`);
+      }
+      return factory.createResponse(resolveRun(goal.id, instruction));
     }
   );
 }

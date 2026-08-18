@@ -113,8 +113,11 @@ orchestrator surfaces `needDecision` / `BLOCKED` reports to it; player chat is
 routed to it via the `chat` event.
 
 - Reasoning effort: max. Unbounded, generative, expensive.
-- Invoked only on escalation: an explicit `needDecision` (intensity >= 3), a
-  player command, or a `blocked` plan. It is not in the per-tick hot path.
+- Continuously engaged in an observe loop, but not in the per-tick safety hot
+  path: it polls goal progress and player chat rather than hand-driving each
+  deterministic step. Full reasoning is reserved for explicit escalation — an
+  `needDecision` (intensity >= 3), a player command, or a `blocked` plan (see
+  "Hybrid engagement (background goal runner)" below).
 
 ### Effort / hardcoding balance
 
@@ -128,8 +131,9 @@ routed to it via the `chat` event.
 
 Effort stays ~0 at the bottom because instincts are hardcoded. It ramps through
 a cheap arithmetic middle (utility weighting is a handful of multiplications).
-Only genuinely unresolvable cases buy full reasoning at the top. This is the
-core economic property: **intelligence is spent, not assumed.**
+Full reasoning is reserved for genuinely unresolvable cases; the observe loop
+polls cheaply and spends nothing on the mechanical steps. This is the core
+economic property: **intelligence is spent, not assumed.**
 
 ---
 
@@ -158,8 +162,9 @@ delegates downward to progressively cheaper, more mechanical machinery.
    `[INTERRUPTED]` and returns `status: 'interrupted'`).
 4. The orchestrator resumes: report-then-resume on death (`resumed-after-death`),
    otherwise `watchdog-paused`.
-5. The front brain is consulted ONLY if the plan is blocked with no fallback, or
-   if the player chats.
+5. The front brain stays engaged in an observe loop (polling progress and
+   chat); it resolves a decision ONLY if the plan is blocked with no fallback,
+   or if the player chats.
 
 Effort is back-loaded: cheap reflexes always fire first; reasoning is deferred
 until the deterministic machinery demonstrably cannot proceed.
@@ -172,6 +177,28 @@ This is **not** a strictly bottom-up or top-down hierarchy. It is an
 directions simultaneously: the front brain delegates goals down, the watchdog
 preempts everything up from the bottom, and the orchestrator mediates in the
 middle. Layers are not a call chain; they are a precedence ladder (Section 3).
+
+### Hybrid engagement (background goal runner)
+
+`run-goal` is non-blocking: it returns immediately with a task id, and a
+background loop advances the deterministic goal one step at a time at a fixed
+cadence (~1–2 s), writing progress lines to the bot's chat/MessageStore. The
+front brain does not hand-drive those steps; it runs an observe loop alongside
+the runner:
+
+- poll `run-task-status` for goal progress;
+- poll `wait-for-chat` / `read-new-chat` with a short timeout for the player;
+- resolve a goal paused on `BLOCKED` / `NEED_DECISION`; the runner resumes once
+  the decision is made.
+
+Watchdog interrupts pause the runner (`watchdog-paused`, `resumed-after-death`
+on death), exactly as before. The step cadence is deliberate pacing for the
+LLM's observe rhythm: at ~1.2 s it sits slightly above the strict back-brain
+<= 1 s budget, because that budget bounds the back brain's per-decision cost
+(arithmetic, no LLM) rather than the runner's step pacing. LLM tool calls are
+low — the background runner does the work — but not zero: the observe loop
+keeps the front brain engaged. Safety is unchanged: the watchdog/reflexes still
+own P0/P1 with near-zero LLM cost.
 
 ---
 
@@ -187,7 +214,7 @@ instead of just layered.
 | **P1** | Active reflexes | Watchdog interrupts — already-decided responses | creeper flee, on-fire douse, low-health retreat |
 | **P2** | Current committed action | Minimum commitment duration before non-P0 preemption | a running build / gather / deliver goal |
 | **P3** | Goal policy | Back brain utility selection among constraint-compliant goals | harvest vs. trade vs. chest (weighted) |
-| **P4** | Long-term planning | Front brain, only via explicit escalation | which compound goal to pursue |
+| **P4** | Long-term planning | Front brain, escalated decisions over delegated goals (observe loop for context) | which compound goal to pursue |
 
 P0 is qualitatively different from the rest. It is not a weighted objective that
 can be traded off against task progress; it is a veto. P0 filters goals **at
@@ -205,7 +232,8 @@ P3 is policy: the back brain selects among P0-compliant goals by utility. It
 never overrides P0.
 
 P4 is planning: the front brain. It cannot inject actions directly; it must go
-through delegation (Model 1) and can only be reached by explicit escalation
+through delegation (Model 1). It remains engaged via an observe loop (polling
+progress and chat) and commits decisions only on explicit escalation
 (Section 5).
 
 ### Arbitration rule
@@ -325,8 +353,8 @@ allowed to think longer because they think less often.
 | 0 Primitives | <= 1 tick | soft |
 | 1 Watchdog | <= 1–2 ticks | **hard** |
 | 2 Goal Engine | <= 10 ticks | soft |
-| 3 Back Brain | <= 1 s | soft (arithmetic, no LLM) |
-| 4 Front Brain | <= 5 s | soft (escalated only) |
+| 3 Back Brain | <= 1 s | soft (arithmetic, no LLM; per-decision cost, not the runner's step cadence) |
+| 4 Front Brain | <= 5 s | soft (observe loop continuous; decisions on escalation) |
 
 ### Guarantees
 
@@ -409,8 +437,9 @@ interruption. It must be proven, not asserted.
 | Survival rate | Fraction of episodes without death (P0 compliance) |
 | Task completion | Fraction of delegated goals that reach `done` |
 | Long-horizon success | Compound goals (e.g. crops -> bread -> deliver) completing end-to-end |
-| LLM calls / min | Cost proxy; must be near zero under nominal conditions |
-| Tokens | Per-episode reasoning spend; must concentrate at escalation points |
+| Goal task status transitions | Fraction of delegated goals that cleanly cycle running -> awaiting-decision -> done (vs. stuck or aborted) |
+| LLM calls / min | Cost proxy; must be low but nonzero — the observe loop stays engaged while the background runner advances the goal |
+| Tokens | Per-episode reasoning spend; must concentrate at escalation points, not in the observe loop |
 | Recovery time | Time from interrupt to a resumed goal (`watchdog-paused` -> `resumed-after-death`) |
 | Goal thrash count | Number of abort/re-plan cycles per episode (Section 4 anti-thrash) |
 | Behavior under high event frequency | A stress episode (hostiles + low health + night + chat) where reflexes dominate |
@@ -438,8 +467,9 @@ not just average survival.
    weighted objective.
 2. Arbitration is strict: higher priority wins; only P0 preempts during the
    minimum-commitment window.
-3. The front brain is reachable only by explicit escalation, player chat, or a
-   surfaced `needDecision` — never by the per-tick path.
+3. The front brain injects decisions only by explicit escalation, player chat,
+   or a surfaced `needDecision` — never by the per-tick path; its observe loop
+   reads progress and chat without issuing per-tick actions.
 4. There is exactly one authoritative world-state snapshot; layers derive
    working memory, never an independent reality.
 5. P0/P1 response is hard-bounded to 1–2 ticks; every primitive carries an

@@ -28,6 +28,7 @@ import { registerPerceptionTools } from './tools/perception-tools.js';
 import { registerGatherTools } from './tools/gather-tools.js';
 import { registerBlueprintTools } from './tools/blueprint-tools.js';
 import { registerTaskRunnerTools } from './tools/task-runner-tools.js';
+import { setGoalMessageStoreResolver } from './goal-runner.js';
 import { registerMapTools } from './tools/map-tools.js';
 import { registerContainerTools } from './tools/container-tools.js';
 import { registerQATools } from './tools/qa-tools.js';
@@ -38,6 +39,9 @@ import { registerFarmingTools } from './tools/farming-tools.js';
 import { registerMotionTools } from './tools/motion-tools.js';
 import { registerVisionTools } from './tools/vision-tools.js';
 import { registerWatchdogTools } from './tools/watchdog-tools.js';
+import { watchdog } from './watchdog.js';
+import { setArousalSensor } from './primal-brain.js';
+import { senseAnxiety, arousal } from './arousal.js';
 import { z } from "zod";
 import * as fs from 'node:fs';
 
@@ -81,6 +85,81 @@ async function main() {
   const factory = new ToolFactory(server, manager);
   const getBot = () => manager.getBot(botContext.getStore() ?? undefined)!;
   const getStore = () => manager.getStore(botContext.getStore() ?? undefined);
+
+  // ---------------------------------------------------------------------------
+  // TOOL VISIBILITY — hide the granular micro-tools from the LLM.
+  //
+  // The LLM should only be exposed to the MAJOR functions (run-goal,
+  // run-task-step, watchdog-*, bot management, chat, high-level perception /
+  // world-state summaries, memory / coordination). The micro-tools below are
+  // HIDDEN ('primal'): their executors are still registered on the factory
+  // (so the executor exists) but `server.tool(...)` is skipped, so the LLM
+  // never sees them. They are called internally by the major functions and the
+  // primal brain — never hand-driven by the LLM. This forces the LLM to
+  // delegate to the back brain instead of micro-managing single axioms.
+  // ---------------------------------------------------------------------------
+  factory.setPrimalToolNames([
+    // Position / movement
+    'get-position', 'move-to-position', 'look-at', 'jump', 'move-in-direction',
+    'move-toward', 'move-toward-bearing', 'goto-entity', 'save-location',
+    'goto-named', 'list-locations', 'find-safe-path', 'walk-path', 'fly-to',
+    'wait', 'until',
+    // Inventory / items
+    'list-inventory', 'find-item', 'equip-item', 'organize-inventory',
+    // Blocks / building
+    'place-block', 'dig-block', 'get-block-info', 'find-blocks', 'place-blocks',
+    'fill-area', 'place-relative', 'build-from-grid',
+    // Entities / combat
+    'find-entity', 'attack-entity', 'flee', 'equip-best-weapon', 'get-health',
+    'interact-entity',
+    // Scanning / perception micro-reads
+    'scan-area', 'verify-block', 'get-bot-stats', 'describe-view',
+    // Crafting / smelting / furnaces
+    'list-recipes', 'craft-item', 'get-recipe', 'can-craft', 'smelt-item',
+    'cook-food',
+    // Gathering / farming
+    'collect-item', 'gather-loop', 'resource-ledger', 'plant-crop',
+    'harvest-crop', 'feed-animal', 'sleep',
+    // Game state / misc micro-tools
+    'detect-gamemode',
+    // Blueprints / plans / redstone (granular build steps)
+    'redstone-layout', 'plan-build', 'execute-plan', 'abort-plan',
+    'blueprint-save', 'blueprint-list', 'blueprint-load', 'place-redstone',
+    // Containers / QA
+    'find-container', 'deposit-item', 'withdraw-item', 'open-container',
+    'activate-block', 'use-item-on', 'inspect-build', 'secure-perimeter'
+  ]);
+
+  // ---------------------------------------------------------------------------
+  // AROUSAL SENSOR + ETERNAL PRIMAL LOOP (for real bots only).
+  //
+  // Wire the arousal sensor: the primal brain senses danger, and this hook maps
+  // the sensed input to anxiety via senseAnxiety() and feeds the global arousal
+  // singleton. The primal brain calls this with each sensed PrimalSensorInput.
+  // ---------------------------------------------------------------------------
+  setArousalSensor((input) => {
+    const anxiety = senseAnxiety(input);
+    arousal.setAnxiety(anxiety);
+    return anxiety;
+  });
+
+  // Start the eternal primal safety loop once the primary bot has actually
+  // connected (a real mineflayer bot exists). Guarded: fake/test bots never
+  // produce a real bot object, so this is a no-op for tests, and it only ever
+  // starts for a genuine live connection. Runs in the background.
+  void (async () => {
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      const bot = manager.getBot();
+      if (bot) {
+        watchdog.setBot(bot);
+        watchdog.startPrimalLoopForBot();
+        log('info', 'Eternal primal safety loop started for primary bot');
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  })();
 
   factory.registerTool(
     "spawn-bot",
@@ -167,6 +246,7 @@ async function main() {
   registerPerceptionTools(factory, getBot);
   registerGatherTools(factory, getBot);
   registerBlueprintTools(factory, getBot);
+  setGoalMessageStoreResolver((botUsername) => manager.getStore(botUsername));
   registerTaskRunnerTools(factory, getBot);
   registerMapTools(factory, getBot);
   registerContainerTools(factory, getBot);

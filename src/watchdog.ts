@@ -26,6 +26,7 @@ import {
   InterruptPriority
 } from './interrupt.js';
 import { isHostileEntity, iterateEntities, distanceToEntity } from './tools/entity-tools.js';
+import { startPrimalLoop, stopPrimalLoop } from './primal-brain.js';
 
 export const EVENT_NAMES = [
   'hostile', 'creeper', 'fall', 'void', 'lava', 'low-health', 'hunger',
@@ -186,6 +187,28 @@ export class Watchdog {
     if (wasEventListening) this.attachEventListeners();
   }
 
+  /**
+   * Start the eternal PRIMAL SAFETY LOOP for the current bot. This is the
+   * deepest safety layer: it runs continuously in the background, senses danger
+   * from the bot's own sensors, and issues P0 directives that CANCEL any goal /
+   * tool / LLM action, then runs low-level safety micro-tasks itself.
+   *
+   * Deliberately NOT auto-started from setBot()/startWatchdog(): the watchdog
+   * remains a pure preemption state machine (its trigger/tick semantics and all
+   * existing tests are untouched). The host (main.ts / bot-connection) or a
+   * tool calls this to bring the eternal loop online for a real bot. It is a
+   * no-op if no bot is set.
+   */
+  startPrimalLoopForBot(cadenceMs = 500): void {
+    if (!this.bot) return;
+    startPrimalLoop(this.bot, cadenceMs);
+  }
+
+  /** Stop the eternal primal loop (no-op if it is not running). */
+  stopPrimalLoop(): void {
+    stopPrimalLoop();
+  }
+
   setListener(listener: WatchdogListener | null): void {
     this.listener = listener;
   }
@@ -271,6 +294,9 @@ export class Watchdog {
     this.running = false;
     this.detachChatListener();
     this.detachEventListeners();
+    // Also halt the eternal primal loop so stopping the watchdog is a clean,
+    // complete safety teardown (and test isolation stays clean).
+    stopPrimalLoop();
   }
 
   /**

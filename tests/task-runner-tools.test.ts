@@ -2,6 +2,7 @@ import test from 'ava';
 import sinon from 'sinon';
 import minecraftData from 'minecraft-data';
 import { registerTaskRunnerTools, resetTaskRuns } from '../src/tools/task-runner-tools.js';
+import { statusOf } from '../src/goal-runner.js';
 import { ToolFactory } from '../src/tool-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { BotConnection } from '../src/bot-connection.js';
@@ -184,10 +185,22 @@ function setup(bot: Partial<mineflayer.Bot>) {
   return { mockServer, factory, getExecutor };
 }
 
-test.serial('registerTaskRunnerTools registers all four task tools', (t) => {
+async function waitForGoal(
+  predicate: () => boolean,
+  timeoutMs = 3000,
+  intervalMs = 10
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for goal condition');
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+test.serial('registerTaskRunnerTools registers all five task tools', (t) => {
   const { mockServer } = setup(makeBuildBot().bot);
   const names = (mockServer.tool as sinon.SinonStub).getCalls().map(c => c.args[0]);
-  for (const name of ['run-goal', 'run-task-status', 'run-task-step', 'abort-task']) {
+  for (const name of ['run-goal', 'run-task-status', 'run-task-step', 'abort-task', 'resolve-task']) {
     t.true(names.includes(name), `missing ${name}`);
   }
 });
@@ -197,11 +210,11 @@ test.serial('run-goal build creates a task-run and reports a start message', asy
   const runGoal = getExecutor('run-goal');
   const status = getExecutor('run-task-status');
 
-  const result = await runGoal({ goal: 'build a cottage', template: 'cottage' });
+  const result = await runGoal({ goal: 'build a cottage', template: 'cottage', autoAdvanceMs: 5 });
   t.false(!!result.isError);
   t.is(
     result.content[0].text,
-    'Started build goal 1: building cottage at (0,70,0). Execute with task-run-status / run-task-step.'
+    'Started goal #1: build cottage. Running in the background (auto-advances step-by-step). Poll run-task-status for progress; it will pause for your input on BLOCKED/NEED_DECISION (resolve with resolve-task). Watchdog can pause it — resume with watchdog-resume.'
   );
 
   const st = await status({});
@@ -216,11 +229,11 @@ test.serial('run-goal build defaults to house and uses the bot position as ancho
   const { getExecutor } = setup(makeBuildBot().bot);
   const runGoal = getExecutor('run-goal');
 
-  const result = await runGoal({ goal: 'build a shed', x: 10, y: 64, z: 20 });
+  const result = await runGoal({ goal: 'build a shed', x: 10, y: 64, z: 20, autoAdvanceMs: 5 });
   t.false(!!result.isError);
   t.is(
     result.content[0].text,
-    'Started build goal 1: building shed at (10,64,20). Execute with task-run-status / run-task-step.'
+    'Started goal #1: build shed. Running in the background (auto-advances step-by-step). Poll run-task-status for progress; it will pause for your input on BLOCKED/NEED_DECISION (resolve with resolve-task). Watchdog can pause it — resume with watchdog-resume.'
   );
 });
 
@@ -239,9 +252,11 @@ test.serial('run-goal collect gathers items and reports completion', async (t) =
   const runGoal = getExecutor('run-goal');
   const status = getExecutor('run-task-status');
 
-  const result = await runGoal({ goal: 'collect 32 wood' });
+  const result = await runGoal({ goal: 'collect 32 wood', autoAdvanceMs: 5 });
   t.false(!!result.isError);
-  t.is(result.content[0].text, 'Gather goal complete: have 32/32 wood.');
+  t.is(result.content[0].text, 'Started goal #1: collect 32 wood. Running in the background (auto-advances step-by-step). Poll run-task-status for progress; it will pause for your input on BLOCKED/NEED_DECISION (resolve with resolve-task). Watchdog can pause it — resume with watchdog-resume.');
+
+  await waitForGoal(() => statusOf()?.status === 'done');
   t.true(gather.findBlock.calledOnce);
   t.true(gather.dig.calledOnce);
   t.true(gather.goto.calledOnce);
@@ -251,17 +266,23 @@ test.serial('run-goal collect gathers items and reports completion', async (t) =
   const st = await status({});
   t.false(!!st.isError);
   t.true(st.content[0].text.includes('Status: done'));
-  t.true(st.content[0].text.includes('Progress: have 32/32 wood'));
+  t.true(st.content[0].text.includes('Gather goal complete: have 32/32 wood'));
 });
 
 test.serial('run-goal collect defaults the count to 16 without a number', async (t) => {
   const gather = makeGatherBot(16);
   const { getExecutor } = setup(gather.bot);
   const runGoal = getExecutor('run-goal');
+  const status = getExecutor('run-task-status');
 
-  const result = await runGoal({ goal: 'gather wood' });
+  const result = await runGoal({ goal: 'gather wood', autoAdvanceMs: 5 });
   t.false(!!result.isError);
-  t.is(result.content[0].text, 'Gather goal complete: have 16/16 wood.');
+  t.true(result.content[0].text.startsWith('Started goal #1: collect 16 wood.'));
+
+  await waitForGoal(() => statusOf()?.status === 'done');
+  const st = await status({});
+  t.false(!!st.isError);
+  t.true(st.content[0].text.includes('Gather goal complete: have 16/16 wood'));
 });
 
 test.serial('run-goal returns an error for an unknown goal', async (t) => {
@@ -282,9 +303,11 @@ test.serial('run-goal drop bread delivers existing bread without crafting', asyn
   const { getExecutor } = setup(bot);
   const runGoal = getExecutor('run-goal');
 
-  const result = await runGoal({ goal: 'drop me some bread' });
+  const result = await runGoal({ goal: 'drop me some bread', autoAdvanceMs: 5 });
   t.false(!!result.isError);
-  t.is(result.content[0].text, 'delivered bread x1 to Spacecer2 at (145,-59,31)');
+  t.true(result.content[0].text.startsWith('Started goal #1: make and deliver bread.'));
+
+  await waitForGoal(() => statusOf()?.status === 'done');
   t.true(tossStack.calledOnce);
   t.true(nearestEntity.called);
   t.true(goto.called);
@@ -295,9 +318,11 @@ test.serial('run-goal give me bread also delivers existing bread', async (t) => 
   const { getExecutor } = setup(bot);
   const runGoal = getExecutor('run-goal');
 
-  const result = await runGoal({ goal: 'give me bread' });
+  const result = await runGoal({ goal: 'give me bread', autoAdvanceMs: 5 });
   t.false(!!result.isError);
-  t.is(result.content[0].text, 'delivered bread x1 to Spacecer2 at (145,-59,31)');
+  t.true(result.content[0].text.startsWith('Started goal #1: make and deliver bread.'));
+
+  await waitForGoal(() => statusOf()?.status === 'done');
   t.true(tossStack.calledOnce);
 });
 
@@ -306,9 +331,11 @@ test.serial('run-goal harvest wheat harvests mature crops', async (t) => {
   const { getExecutor } = setup(bot);
   const runGoal = getExecutor('run-goal');
 
-  const result = await runGoal({ goal: 'harvest wheat' });
+  const result = await runGoal({ goal: 'harvest wheat', autoAdvanceMs: 5 });
   t.false(!!result.isError);
-  t.is(result.content[0].text, 'harvested 4 wheat');
+  t.true(result.content[0].text.startsWith('Started goal #1: harvest crops.'));
+
+  await waitForGoal(() => statusOf()?.status === 'done');
   t.true(dig.calledOnce);
 });
 
@@ -316,29 +343,71 @@ test.serial('run-goal crops then bread harvests, makes and delivers', async (t) 
   const { bot, dig, craft, tossStack } = makeCropBreadBot();
   const { getExecutor } = setup(bot);
   const runGoal = getExecutor('run-goal');
+  const status = getExecutor('run-task-status');
 
-  const result = await runGoal({ goal: 'get some crops and drop me some bread' });
+  const result = await runGoal({ goal: 'get some crops and drop me some bread', autoAdvanceMs: 5 });
   t.false(!!result.isError);
-  t.is(
-    result.content[0].text,
-    'harvested 4 wheat → made bread x1 → delivered bread x1 to Spacecer2 at (145,-59,31)'
-  );
+  t.true(result.content[0].text.startsWith('Started goal #1: harvest crops and make bread.'));
+
+  await waitForGoal(() => statusOf()?.status === 'done');
   t.true(dig.calledOnce);
   t.true(craft.calledOnce);
   t.true(tossStack.calledOnce);
+
+  const st = await status({});
+  t.false(!!st.isError);
+  t.true(
+    st.content[0].text.includes(
+      'harvested 4 wheat → made bread x1 → delivered bread x1 to Spacecer2 at (145,-59,31)'
+    )
+  );
 });
 
 test.serial('run-goal bread blocks with needDecision when no wheat is available', async (t) => {
   const { bot, findBlocks } = makeNoWheatBot();
   const { getExecutor } = setup(bot);
   const runGoal = getExecutor('run-goal');
+  const status = getExecutor('run-task-status');
 
-  const result = await runGoal({ goal: 'drop me some bread' });
+  const result = await runGoal({ goal: 'drop me some bread', autoAdvanceMs: 5 });
   t.false(!!result.isError);
-  t.true(result.content[0].text.includes('BLOCKED: no wheat available'));
-  t.true(result.content[0].text.includes('"missing":"wheat"'));
-  t.true(result.content[0].text.includes('watchdog-resume'));
+  t.true(result.content[0].text.startsWith('Started goal #1: make and deliver bread.'));
+
+  await waitForGoal(() => statusOf()?.status === 'awaiting-decision');
+  const goal = statusOf();
+  t.true(goal!.lastReport.includes('no wheat available'));
+  t.true(goal!.lastReport.includes('Awaiting your input'));
+
+  const st = await status({});
+  t.false(!!st.isError);
+  t.true(st.content[0].text.includes('Status: awaiting-decision'));
+  t.true(st.content[0].text.includes('Progress: BLOCKED at step'));
   t.true(findBlocks.called);
+});
+
+test.serial('resolve-task resumes a blocked goal awaiting a decision', async (t) => {
+  const { bot } = makeNoWheatBot();
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
+  const resolveTask = getExecutor('resolve-task');
+
+  await runGoal({ goal: 'drop me some bread', autoAdvanceMs: 5 });
+  await waitForGoal(() => statusOf()?.status === 'awaiting-decision');
+
+  const result = await resolveTask({ instruction: 'use stored wheat' });
+  t.false(!!result.isError);
+  t.true(result.content[0].text.includes('Goal #1 resumed after your input'));
+});
+
+test.serial('resolve-task errors when the goal is not awaiting a decision', async (t) => {
+  const { getExecutor } = setup(makeBuildBot().bot);
+  const runGoal = getExecutor('run-goal');
+  const resolveTask = getExecutor('resolve-task');
+
+  await runGoal({ goal: 'build a house', autoAdvanceMs: 1000 });
+  const result = await resolveTask({ instruction: 'go ahead' });
+  t.true(!!result.isError);
+  t.true(result.content[0].text.includes('Goal #1 is not awaiting a decision (status: done).'));
 });
 
 test.serial('run-task-step advances a build task by placing the next plan blocks', async (t) => {
@@ -348,7 +417,7 @@ test.serial('run-task-step advances a build task by placing the next plan blocks
   const step = getExecutor('run-task-step');
   const status = getExecutor('run-task-status');
 
-  await runGoal({ goal: 'build a house', x: 10, y: 64, z: 20 });
+  await runGoal({ goal: 'build a house', x: 10, y: 64, z: 20, autoAdvanceMs: 5 });
   const result = await step({ steps: 3 });
   t.false(!!result.isError);
   t.is(result.content[0].text, 'Executed 3 step(s): 3 placed, 0 failed. Progress: 3/173 blocks.');
@@ -365,7 +434,7 @@ test.serial('run-task-step reports an already-complete goal', async (t) => {
   const runGoal = getExecutor('run-goal');
   const step = getExecutor('run-task-step');
 
-  await runGoal({ goal: 'build a house', x: 10, y: 64, z: 20 });
+  await runGoal({ goal: 'build a house', x: 10, y: 64, z: 20, autoAdvanceMs: 5 });
   await step({ steps: 1000 });
   const result = await step({ steps: 5 });
   t.false(!!result.isError);
@@ -387,7 +456,7 @@ test.serial('abort-task marks the task failed and clears its plan', async (t) =>
   const abort = getExecutor('abort-task');
   const status = getExecutor('run-task-status');
 
-  await runGoal({ goal: 'build a shed' });
+  await runGoal({ goal: 'build a shed', autoAdvanceMs: 5 });
   const aborted = await abort({});
   t.false(!!aborted.isError);
   t.is(aborted.content[0].text, 'Task 1 aborted.');
@@ -402,16 +471,18 @@ test.serial('run-goal pauses (watchdog-paused) when the interrupt flag is set', 
   setInterrupt('test');
   t.teardown(() => clearInterrupt());
 
-  const { bot } = makeBuildBot();
-  const { getExecutor } = setup(bot);
+  const gather = makeGatherBot(16);
+  const { getExecutor } = setup(gather.bot);
   const runGoal = getExecutor('run-goal');
 
-  const result = await runGoal({ goal: 'build a house' });
-  t.true(!!result.isError);
-  // run-goal is the parent: a standing interrupt pauses it via the watchdog
-  // guard before the child plan runs.
-  t.true(result.content[0].text.includes('Paused before starting'));
-  t.true(result.content[0].text.includes('read-interrupt'));
+  const result = await runGoal({ goal: 'collect wood', autoAdvanceMs: 10 });
+  t.false(!!result.isError);
+  t.true(result.content[0].text.includes('Started goal #1: collect 16 wood.'));
+
+  await waitForGoal(() => statusOf()?.status === 'watchdog-paused');
+  const goal = statusOf();
+  t.true(goal!.lastReport.includes('WATCHDOG'));
+  t.true(goal!.lastReport.includes('watchdog-resume'));
 });
 
 test.serial('run-task-step returns INTERRUPTED and leaves the task resumable', async (t) => {
@@ -421,7 +492,7 @@ test.serial('run-task-step returns INTERRUPTED and leaves the task resumable', a
   const step = getExecutor('run-task-step');
   const status = getExecutor('run-task-status');
 
-  await runGoal({ goal: 'build a house', x: 10, y: 64, z: 20 });
+  await runGoal({ goal: 'build a house', x: 10, y: 64, z: 20, autoAdvanceMs: 5 });
 
   clearInterrupt();
   setInterrupt('test');
@@ -467,11 +538,18 @@ test.serial('run-goal barricade places blocks when the bot has a barrier block',
 
   const { getExecutor } = setup(bot);
   const runGoal = getExecutor('run-goal');
+  const status = getExecutor('run-task-status');
 
-  const result = await runGoal({ goal: 'barricade' });
+  const result = await runGoal({ goal: 'barricade', autoAdvanceMs: 5 });
   t.false(!!result.isError);
-  t.true(result.content[0].text.includes('barricaded'));
+  t.true(result.content[0].text.startsWith('Started goal #1: barricade.'));
+
+  await waitForGoal(() => statusOf()?.status === 'done');
   t.true(placeBlock.called);
+
+  const st = await status({});
+  t.false(!!st.isError);
+  t.true(st.content[0].text.includes('Progress: barricaded'));
 });
 
 test.serial('run-goal trade routes to villager trading', async (t) => {
@@ -495,11 +573,18 @@ test.serial('run-goal trade routes to villager trading', async (t) => {
 
   const { getExecutor } = setup(bot);
   const runGoal = getExecutor('run-goal');
+  const status = getExecutor('run-task-status');
 
-  const result = await runGoal({ goal: 'trade for' });
+  const result = await runGoal({ goal: 'trade for', autoAdvanceMs: 5 });
   t.false(!!result.isError);
-  t.true(result.content[0].text.includes('traded with villager'));
+  t.true(result.content[0].text.startsWith('Started goal #1: trade for '));
+
+  await waitForGoal(() => statusOf()?.status === 'done');
   t.true(trade.called);
+
+  const st = await status({});
+  t.false(!!st.isError);
+  t.true(st.content[0].text.includes('Progress: traded with villager'));
 });
 
 test.serial('run-goal chest routes to chest withdraw', async (t) => {
@@ -526,9 +611,17 @@ test.serial('run-goal chest routes to chest withdraw', async (t) => {
 
   const { getExecutor } = setup(bot);
   const runGoal = getExecutor('run-goal');
+  const status = getExecutor('run-task-status');
 
-  const result = await runGoal({ goal: 'open chest from' });
+  const result = await runGoal({ goal: 'open chest from', autoAdvanceMs: 5 });
   t.false(!!result.isError);
-  t.true(result.content[0].text.includes('withdrew wheat'));
+  t.true(result.content[0].text.includes('Started goal #1: get '));
+  t.true(result.content[0].text.includes('from chest'));
+
+  await waitForGoal(() => statusOf()?.status === 'done');
   t.true(withdraw.called);
+
+  const st = await status({});
+  t.false(!!st.isError);
+  t.true(st.content[0].text.includes('Progress: withdrew wheat'));
 });

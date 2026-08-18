@@ -236,3 +236,87 @@ test('registerTool executor catches and returns error response on exception', as
     isError: true
   });
 });
+
+// ---------------------------------------------------------------------------
+// TOOL VISIBILITY ('primal' hidden tools vs 'major' LLM-facing tools)
+// ---------------------------------------------------------------------------
+
+function makeVisibilityHarness() {
+  const mockServer = {
+    tool: sinon.stub()
+  } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+  return { mockServer, factory };
+}
+
+test('registerTool with visibility primal does NOT surface via server.tool but stores the executor', async (t) => {
+  const { mockServer, factory } = makeVisibilityHarness();
+  const executor = sinon.stub().resolves({ content: [{ type: 'text', text: 'Internal done' }] });
+
+  factory.registerTool('primal-internal', 'Hidden internal tool', {}, executor, { visibility: 'primal' });
+
+  t.is((mockServer.tool as sinon.SinonStub).callCount, 0, 'server.tool must NOT be called for a primal tool');
+  t.true(factory.isPrimalTool('primal-internal'));
+
+  const response = await factory.callPrimal('primal-internal', { arg: 1 });
+  t.deepEqual(response, { content: [{ type: 'text', text: 'Internal done' }] });
+  t.true((executor as sinon.SinonStub).calledOnceWith({ arg: 1 }));
+});
+
+test('primal tool is not listed among LLM-facing server.tool registrations', (t) => {
+  const { mockServer, factory } = makeVisibilityHarness();
+  factory.registerTool('visible-tool', 'Visible', {}, sinon.stub().resolves({ content: [{ type: 'text', text: 'ok' }] }));
+  factory.registerTool('hidden-tool', 'Hidden', {}, sinon.stub().resolves({ content: [{ type: 'text', text: 'ok' }] }), { visibility: 'primal' });
+
+  const surfaced = (mockServer.tool as sinon.SinonStub).getCalls().map((c) => c.args[0]);
+  t.deepEqual(surfaced, ['visible-tool']);
+  t.false(surfaced.includes('hidden-tool'));
+  t.true(factory.isPrimalTool('hidden-tool'));
+  t.false(factory.isPrimalTool('visible-tool'));
+});
+
+test('registerTool defaults to major when no visibility is specified', (t) => {
+  const { mockServer, factory } = makeVisibilityHarness();
+  factory.registerTool('default-major', 'Default', {}, sinon.stub().resolves({ content: [{ type: 'text', text: 'ok' }] }));
+
+  t.is((mockServer.tool as sinon.SinonStub).callCount, 1);
+  t.is((mockServer.tool as sinon.SinonStub).firstCall.args[0], 'default-major');
+  t.false(factory.isPrimalTool('default-major'));
+});
+
+test('setPrimalToolNames hides tools by name without touching the registration call', (t) => {
+  const { mockServer, factory } = makeVisibilityHarness();
+  factory.setPrimalToolNames(['hidden-by-name', 'also-hidden']);
+  factory.registerTool('visible-tool', 'Visible', {}, sinon.stub().resolves({ content: [{ type: 'text', text: 'ok' }] }));
+  factory.registerTool('hidden-by-name', 'Hidden', {}, sinon.stub().resolves({ content: [{ type: 'text', text: 'ok' }] }));
+  factory.registerTool('also-hidden', 'Hidden too', {}, sinon.stub().resolves({ content: [{ type: 'text', text: 'ok' }] }));
+
+  const surfaced = (mockServer.tool as sinon.SinonStub).getCalls().map((c) => c.args[0]);
+  t.deepEqual(surfaced, ['visible-tool']);
+  t.true(factory.isPrimalTool('hidden-by-name'));
+  t.true(factory.isPrimalTool('also-hidden'));
+  t.false(factory.isPrimalTool('visible-tool'));
+});
+
+test('setPrimalToolNames can be called after registration is already surfaced', (t) => {
+  const { mockServer, factory } = makeVisibilityHarness();
+  factory.registerTool('registered-tool', 'Tool', {}, sinon.stub().resolves({ content: [{ type: 'text', text: 'ok' }] }));
+  // Marking a name after registration does not retroactively unsurface it
+  // (registration already called server.tool), but it is recorded as primal.
+  factory.setPrimalToolNames(['registered-tool']);
+  t.is((mockServer.tool as sinon.SinonStub).callCount, 1);
+});
+
+test('callPrimal returns an error response for an unknown primal tool', async (t) => {
+  const { factory } = makeVisibilityHarness();
+  const response = await factory.callPrimal('does-not-exist', {});
+  t.is(response.isError, true);
+  t.true(response.content[0].text.includes('Unknown primal tool: does-not-exist'));
+});

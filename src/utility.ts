@@ -20,6 +20,7 @@
  */
 
 import { Vec3 } from 'vec3';
+import { weightsFromArousal } from './arousal.js';
 
 export interface UtilityWeights {
   /** Multiplier on distance cost. Higher = more distance-averse. */
@@ -38,6 +39,17 @@ export const DEFAULT_WEIGHTS: UtilityWeights = {
   riskWeight: 1.5,
   importanceFloor: 0.1
 };
+
+/**
+ * Arousal-aware default weights. Returns the current global weights modulated
+ * by the arousal system (anxiety/boredom). Callers that want arousal-aware
+ * weighting call `utility(input, defaultWeights())`. `utility()` and
+ * `bestOption()` keep their pure `DEFAULT_WEIGHTS` default so existing
+ * deterministic behavior is preserved unless a caller opts in.
+ */
+export function defaultWeights(): UtilityWeights {
+  return weightsFromArousal();
+}
 
 export interface UtilityInput {
   /** How valuable the outcome is, 0..1 (e.g. bread is high-value when hungry). */
