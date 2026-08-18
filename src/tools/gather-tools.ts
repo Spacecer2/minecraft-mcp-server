@@ -4,10 +4,14 @@ import { Block } from 'prismarine-block';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
+import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
 
 const SEARCH_DISTANCE = 24;
+const PICKUP_RANGE = 4;
+const PICKUP_PASSES = 3;
+const PICKUP_DELAY_MS = 300;
 
 const LOG_SOURCES = [
   'oak_log',
@@ -72,6 +76,100 @@ function countItemInInventory(bot: mineflayer.Bot, itemName: string): number {
   return total;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type DropEntity = { id: number; type?: string; position?: Vec3 };
+
+function toVec3(value: unknown): Vec3 | undefined {
+  if (value instanceof Vec3) return value;
+  if (value && typeof value === 'object') {
+    const v = value as Record<string, unknown>;
+    if (typeof v.x === 'number' && typeof v.y === 'number' && typeof v.z === 'number') {
+      return new Vec3(v.x, v.y, v.z);
+    }
+  }
+  return undefined;
+}
+
+function scanItemEntities(bot: mineflayer.Bot): DropEntity[] {
+  const results: DropEntity[] = [];
+  const raw = (bot as unknown as Record<string, unknown>).entities as unknown;
+  if (!raw) return results;
+
+  if (raw instanceof Map) {
+    for (const entity of (raw as Map<number, unknown>).values()) {
+      if (entity && typeof entity === 'object') {
+        const e = entity as Record<string, unknown>;
+        results.push({
+          id: typeof e.id === 'number' ? e.id : -1,
+          type: typeof e.type === 'string' ? e.type : undefined,
+          position: toVec3(e.position)
+        });
+      }
+    }
+  } else if (typeof raw === 'object') {
+    for (const key of Object.keys(raw as Record<string, unknown>)) {
+      const entity = (raw as Record<string, unknown>)[key];
+      if (entity && typeof entity === 'object') {
+        const e = entity as Record<string, unknown>;
+        results.push({
+          id: typeof e.id === 'number' ? e.id : Number(key),
+          type: typeof e.type === 'string' ? e.type : undefined,
+          position: toVec3(e.position)
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+export async function collectDrops(bot: mineflayer.Bot, pos: Vec3): Promise<number> {
+  let gathered = 0;
+  const seen = new Set<number>();
+
+  try {
+    await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
+  } catch (err) {
+    log('warn', `collectDrops: could not reach drop area near (${pos.x}, ${pos.y}, ${pos.z}): ${err}`);
+  }
+
+  for (let pass = 0; pass < PICKUP_PASSES; pass++) {
+    await sleep(PICKUP_DELAY_MS);
+
+    const targets: DropEntity[] = [];
+    try {
+      for (const entity of scanItemEntities(bot)) {
+        if (entity.type !== 'item' || !entity.position) continue;
+        const dist = entity.position.distanceTo(pos);
+        if (dist <= PICKUP_RANGE) {
+          targets.push({ id: entity.id, position: entity.position });
+        }
+      }
+    } catch (err) {
+      log('warn', `collectDrops: failed to scan dropped item entities: ${err}`);
+      break;
+    }
+
+    for (const target of targets) {
+      try {
+        await bot.pathfinder.goto(new goals.GoalNear(target.position!.x, target.position!.y, target.position!.z, 1));
+        await sleep(PICKUP_DELAY_MS);
+      } catch (err) {
+        log('warn', `collectDrops: could not walk onto dropped item entity ${target.id}: ${err}`);
+      }
+      if (!seen.has(target.id)) {
+        seen.add(target.id);
+        gathered += 1;
+      }
+    }
+  }
+
+  return gathered;
+}
+
 async function gatherItem(
   bot: mineflayer.Bot,
   itemName: string,
@@ -124,7 +222,22 @@ async function gatherItem(
       log('warn', `Failed to dig ${foundBlock.name} for ${itemName}: ${err}`);
     }
 
+    const beforePickup = countItemInInventory(bot, itemName);
+    try {
+      await collectDrops(bot, pos);
+    } catch (err) {
+      log('warn', `Failed to collect drops near (${pos.x}, ${pos.y}, ${pos.z}) for ${itemName}: ${err}`);
+    }
     have = countItemInInventory(bot, itemName);
+
+    if (have <= beforePickup) {
+      try {
+        await collectDrops(bot, pos);
+      } catch (err) {
+        log('warn', `Retry collecting drops near (${pos.x}, ${pos.y}, ${pos.z}) for ${itemName}: ${err}`);
+      }
+      have = countItemInInventory(bot, itemName);
+    }
   }
 
   return { have, dug, beforeCount };

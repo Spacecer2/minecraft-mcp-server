@@ -63,6 +63,107 @@ function makeGatherBot(targetCount: number) {
   return { bot, findBlock, inventory, dig, goto };
 }
 
+type InvItem = { name: string; count: number; slot: number };
+type EntityLike = { type?: string; username?: string; name?: string; position: Vec3 };
+
+function makeDeliverBot(items: InvItem[]) {
+  let inv = [...items];
+  const player: EntityLike = { type: 'player', username: 'Spacecer2', position: new Vec3(145, -59, 31) };
+  const inventory = sinon.stub().callsFake(() => inv);
+  const tossStack = sinon.stub().callsFake(async (item: InvItem) => {
+    inv = inv
+      .map(i => (i.name === item.name ? { ...i, count: 0 } : i))
+      .filter(i => i.count > 0);
+  });
+  const nearestEntity = sinon.stub().callsFake((filter: (e: EntityLike) => boolean) => (filter(player) ? player : null));
+  const goto = sinon.stub().resolves();
+
+  const bot = {
+    version: '1.21',
+    entity: { position: new Vec3(0, 64, 0) },
+    inventory: { items: inventory },
+    tossStack,
+    nearestEntity,
+    pathfinder: { goto }
+  } as unknown as Partial<mineflayer.Bot>;
+
+  return { bot, inventory, tossStack, nearestEntity, goto, player };
+}
+
+function makeCropBreadBot() {
+  const wheatId = minecraftData('1.21').blocksByName.wheat.id;
+  const wheatPos = new Vec3(10, 63, 5);
+  let inv: InvItem[] = [];
+  const player: EntityLike = { type: 'player', username: 'Spacecer2', position: new Vec3(145, -59, 31) };
+
+  const findBlocks = sinon.stub().callsFake(({ matching }: { matching: number }) =>
+    matching === wheatId ? [wheatPos] : []
+  );
+  const blockAt = sinon.stub().callsFake((pos: Vec3) =>
+    pos.equals(wheatPos)
+      ? { name: 'wheat', metadata: 7, position: wheatPos }
+      : { name: 'air', position: pos }
+  );
+  const dig = sinon.stub().callsFake(async () => {
+    inv = [...inv, { name: 'wheat', count: 4, slot: 1 }];
+  });
+  const recipesFor = sinon.stub().returns([{ id: 1 }]);
+  const craft = sinon.stub().callsFake(async () => {
+    inv = inv
+      .map(i => (i.name === 'wheat' ? { ...i, count: i.count - 3 } : i))
+      .filter(i => i.count > 0);
+    inv = [...inv, { name: 'bread', count: 1, slot: 2 }];
+  });
+  const inventory = sinon.stub().callsFake(() => inv);
+  const nearestEntity = sinon.stub().callsFake((filter: (e: EntityLike) => boolean) => (filter(player) ? player : null));
+  const tossStack = sinon.stub().callsFake(async (item: InvItem) => {
+    inv = inv
+      .map(i => (i.name === item.name ? { ...i, count: 0 } : i))
+      .filter(i => i.count > 0);
+  });
+  const goto = sinon.stub().resolves();
+
+  const bot = {
+    version: '1.21',
+    entity: { position: new Vec3(0, 64, 0) },
+    findBlocks,
+    blockAt,
+    dig,
+    recipesFor,
+    craft,
+    inventory: { items: inventory },
+    nearestEntity,
+    tossStack,
+    pathfinder: { goto }
+  } as unknown as Partial<mineflayer.Bot>;
+
+  return { bot, findBlocks, blockAt, dig, recipesFor, craft, inventory, nearestEntity, tossStack, goto, player };
+}
+
+function makeNoWheatBot() {
+  let inv: InvItem[] = [];
+  const player: EntityLike = { type: 'player', username: 'Spacecer2', position: new Vec3(1, 2, 3) };
+  const findBlocks = sinon.stub().returns([]);
+  const findBlock = sinon.stub().returns(null);
+  const blockAt = sinon.stub().returns({ name: 'air', position: new Vec3(0, 0, 0) });
+  const inventory = sinon.stub().callsFake(() => inv);
+  const nearestEntity = sinon.stub().callsFake((filter: (e: EntityLike) => boolean) => (filter(player) ? player : null));
+  const goto = sinon.stub().resolves();
+
+  const bot = {
+    version: '1.21',
+    entity: { position: new Vec3(0, 64, 0) },
+    findBlocks,
+    findBlock,
+    blockAt,
+    inventory: { items: inventory },
+    nearestEntity,
+    pathfinder: { goto }
+  } as unknown as Partial<mineflayer.Bot>;
+
+  return { bot, findBlocks, findBlock, inventory, nearestEntity, goto, player };
+}
+
 function setup(bot: Partial<mineflayer.Bot>) {
   const mockServer = { tool: sinon.stub() } as unknown as McpServer;
   const mockConnection = {
@@ -169,7 +270,75 @@ test.serial('run-goal returns an error for an unknown goal', async (t) => {
 
   const result = await runGoal({ goal: 'fly to the moon' });
   t.true(!!result.isError);
-  t.true(result.content[0].text.includes("Unknown goal 'fly to the moon'. Supported: build <template>, collect <n> <item>."));
+  t.true(
+    result.content[0].text.includes(
+      "Unknown goal 'fly to the moon'. Supported: build <template>, collect <n> <item>, harvest <crop>, give/drop <food>."
+    )
+  );
+});
+
+test.serial('run-goal drop bread delivers existing bread without crafting', async (t) => {
+  const { bot, tossStack, nearestEntity, goto } = makeDeliverBot([{ name: 'bread', count: 1, slot: 1 }]);
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
+
+  const result = await runGoal({ goal: 'drop me some bread' });
+  t.false(!!result.isError);
+  t.is(result.content[0].text, 'delivered bread x1 to Spacecer2 at (145,-59,31)');
+  t.true(tossStack.calledOnce);
+  t.true(nearestEntity.called);
+  t.true(goto.called);
+});
+
+test.serial('run-goal give me bread also delivers existing bread', async (t) => {
+  const { bot, tossStack } = makeDeliverBot([{ name: 'bread', count: 1, slot: 1 }]);
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
+
+  const result = await runGoal({ goal: 'give me bread' });
+  t.false(!!result.isError);
+  t.is(result.content[0].text, 'delivered bread x1 to Spacecer2 at (145,-59,31)');
+  t.true(tossStack.calledOnce);
+});
+
+test.serial('run-goal harvest wheat harvests mature crops', async (t) => {
+  const { bot, dig } = makeCropBreadBot();
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
+
+  const result = await runGoal({ goal: 'harvest wheat' });
+  t.false(!!result.isError);
+  t.is(result.content[0].text, 'harvested 4 wheat');
+  t.true(dig.calledOnce);
+});
+
+test.serial('run-goal crops then bread harvests, makes and delivers', async (t) => {
+  const { bot, dig, craft, tossStack } = makeCropBreadBot();
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
+
+  const result = await runGoal({ goal: 'get some crops and drop me some bread' });
+  t.false(!!result.isError);
+  t.is(
+    result.content[0].text,
+    'harvested 4 wheat → made bread x1 → delivered bread x1 to Spacecer2 at (145,-59,31)'
+  );
+  t.true(dig.calledOnce);
+  t.true(craft.calledOnce);
+  t.true(tossStack.calledOnce);
+});
+
+test.serial('run-goal bread blocks with needDecision when no wheat is available', async (t) => {
+  const { bot, findBlocks } = makeNoWheatBot();
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
+
+  const result = await runGoal({ goal: 'drop me some bread' });
+  t.false(!!result.isError);
+  t.true(result.content[0].text.includes('BLOCKED: no wheat available'));
+  t.true(result.content[0].text.includes('"missing":"wheat"'));
+  t.true(result.content[0].text.includes('run-task-resume'));
+  t.true(findBlocks.called);
 });
 
 test.serial('run-task-step advances a build task by placing the next plan blocks', async (t) => {
@@ -228,7 +397,7 @@ test.serial('abort-task marks the task failed and clears its plan', async (t) =>
   t.true(st.content[0].text.includes('Error: aborted by user'));
 });
 
-test.serial('run-task-step returns INTERRUPTED and leaves the task resumable', async (t) => {
+test.serial('run-goal returns INTERRUPTED when the interrupt flag is set', async (t) => {
   clearInterrupt();
   setInterrupt('test');
   t.teardown(() => clearInterrupt());
@@ -236,10 +405,24 @@ test.serial('run-task-step returns INTERRUPTED and leaves the task resumable', a
   const { bot } = makeBuildBot();
   const { getExecutor } = setup(bot);
   const runGoal = getExecutor('run-goal');
+
+  const result = await runGoal({ goal: 'build a house' });
+  t.true(!!result.isError);
+  t.true(result.content[0].text.includes('INTERRUPTED'));
+});
+
+test.serial('run-task-step returns INTERRUPTED and leaves the task resumable', async (t) => {
+  const { bot } = makeBuildBot();
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
   const step = getExecutor('run-task-step');
   const status = getExecutor('run-task-status');
 
   await runGoal({ goal: 'build a house', x: 10, y: 64, z: 20 });
+
+  clearInterrupt();
+  setInterrupt('test');
+  t.teardown(() => clearInterrupt());
   const result = await step({ steps: 5 });
 
   t.true(!!result.isError);

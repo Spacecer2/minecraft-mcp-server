@@ -1,7 +1,7 @@
 import test from 'ava';
 import sinon from 'sinon';
 import minecraftData from 'minecraft-data';
-import { registerGatherTools } from '../src/tools/gather-tools.js';
+import { collectDrops, registerGatherTools } from '../src/tools/gather-tools.js';
 import { ToolFactory } from '../src/tool-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { BotConnection } from '../src/bot-connection.js';
@@ -45,6 +45,7 @@ function baseBot(overrides: Record<string, unknown> = {}): Partial<mineflayer.Bo
     inventory: { items: sinon.stub().returns([]) },
     dig: sinon.stub().resolves(),
     pathfinder: { goto: sinon.stub().resolves() },
+    entities: new Map(),
     ...overrides
   } as unknown as Partial<mineflayer.Bot>;
 }
@@ -88,7 +89,7 @@ test.serial('collect-item digs a source block and reports target count', async (
   t.true(findBlockStub.calledOnce);
   t.is(findBlockStub.firstCall.args[0].matching, minecraftData('1.21').blocksByName.stone.id);
   t.is(findBlockStub.firstCall.args[0].maxDistance, 24);
-  t.true(gotoStub.calledOnce);
+  t.true(gotoStub.callCount >= 2);
   t.true(digStub.calledOnce);
 });
 
@@ -237,4 +238,95 @@ test.serial('gather-loop errors for an item with no known source block', async (
 
   t.true(!!result.isError);
   t.true(result.content[0].text.includes('No known source block for bedrock.'));
+});
+
+test.serial('collectDrops walks onto nearby item entities and reports gathered count', async (t) => {
+  const pos = new Vec3(10, 64, 20);
+  const itemEntity = { id: 1001, type: 'item', name: 'cobblestone', position: pos };
+  const gotoStub = sinon.stub().resolves();
+  const bot = baseBot({
+    entities: new Map([[1001, itemEntity]]),
+    pathfinder: { goto: gotoStub }
+  }) as unknown as mineflayer.Bot;
+
+  const collected = await collectDrops(bot, pos);
+
+  t.true(collected > 0);
+  t.true(gotoStub.called);
+  const lastGoal = gotoStub.lastCall.args[0] as { x: number; y: number; z: number };
+  t.is(lastGoal.x, pos.x);
+  t.is(lastGoal.y, pos.y);
+  t.is(lastGoal.z, pos.z);
+});
+
+test.serial('collectDrops returns zero when no item entities are nearby', async (t) => {
+  const gotoStub = sinon.stub().resolves();
+  const bot = baseBot({
+    entities: new Map(),
+    pathfinder: { goto: gotoStub }
+  }) as unknown as mineflayer.Bot;
+
+  const collected = await collectDrops(bot, new Vec3(10, 64, 20));
+
+  t.is(collected, 0);
+  t.true(gotoStub.called);
+});
+
+test.serial('collectDrops skips entities too far from the drop position', async (t) => {
+  const pos = new Vec3(10, 64, 20);
+  const farEntity = { id: 1002, type: 'item', name: 'cobblestone', position: new Vec3(100, 64, 200) };
+  const gotoStub = sinon.stub().resolves();
+  const bot = baseBot({
+    entities: new Map([[1002, farEntity]]),
+    pathfinder: { goto: gotoStub }
+  }) as unknown as mineflayer.Bot;
+
+  const collected = await collectDrops(bot, pos);
+
+  t.is(collected, 0);
+});
+
+test.serial('collect-item counts inventory gained during collectDrops and reaches target', async (t) => {
+  const mockBlock = { name: 'stone', position: new Vec3(10, 64, 20) };
+  const gotoStub = sinon.stub().resolves();
+  const findBlockStub = sinon.stub().returns(mockBlock);
+  const digStub = sinon.stub().resolves();
+  const inventoryStub = sinon.stub().callsFake(() =>
+    gotoStub.callCount >= 2 ? [{ name: 'cobblestone', count: 3, slot: 1 }] : []
+  );
+
+  const { getExecutor } = setup(baseBot({
+    findBlock: findBlockStub,
+    inventory: { items: inventoryStub },
+    dig: digStub,
+    pathfinder: { goto: gotoStub },
+    entities: new Map()
+  }));
+
+  const result = await getExecutor('collect-item')({ itemName: 'cobblestone', count: 3, maxAttempts: 5 });
+
+  t.false(!!result.isError);
+  t.true(result.content[0].text.includes('Collected 3/3 cobblestone after 1 digs'));
+  t.true(digStub.calledOnce);
+});
+
+test.serial('collect-item does not falsely report target reached when pickup fails', async (t) => {
+  const mockBlock = { name: 'stone', position: new Vec3(10, 64, 20) };
+  const gotoStub = sinon.stub().resolves();
+  const digStub = sinon.stub().resolves();
+  const inventoryStub = sinon.stub().returns([]);
+
+  const { getExecutor } = setup(baseBot({
+    findBlock: sinon.stub().returns(mockBlock),
+    inventory: { items: inventoryStub },
+    dig: digStub,
+    pathfinder: { goto: gotoStub },
+    entities: new Map()
+  }));
+
+  const result = await getExecutor('collect-item')({ itemName: 'cobblestone', count: 3, maxAttempts: 2 });
+
+  t.false(!!result.isError);
+  t.true(result.content[0].text.includes('Stopped: reached 0/3'));
+  t.true(digStub.called);
 });
