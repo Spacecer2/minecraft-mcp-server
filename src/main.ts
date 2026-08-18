@@ -130,6 +130,8 @@ async function main() {
   registerGameStateTools(factory, getBot);
   registerCraftingTools(factory, getBot);
   registerFurnaceTools(factory, getBot);
+  registerWorldStateTools(factory, getBot);
+  registerScanTools(factory, getBot);
 
   process.stdin.on('end', () => {
     manager.cleanup();
