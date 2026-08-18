@@ -12,7 +12,14 @@
  * Higher is better. All inputs are normalized to comparable scales (0..1 or a
  * rough tick/block count). The weights are tunable so the brain can be made
  * more or less "patient" / "risk-averse".
+ *
+ * P0 HARD CONSTRAINTS: above the soft weighting, a set of safety invariants
+ * (drowning / lava / void / low-health) act as a VETO. When one is violated the
+ * option scores -Infinity and is never selected — safety cannot be traded away
+ * by a weighted objective. See checkConstraints() / safeInput() below.
  */
+
+import { Vec3 } from 'vec3';
 
 export interface UtilityWeights {
   /** Multiplier on distance cost. Higher = more distance-averse. */
@@ -43,6 +50,14 @@ export interface UtilityInput {
   timeSeconds?: number;
   /** Risk 0..1 (0 = safe, 1 = certain death/loss). */
   risk?: number;
+  /**
+   * HARD-CONSTRAINT VETO (P0). When true the option violates a safety
+   * invariant (drowning / lava / void / low health) and is disqualified
+   * outright: utility() returns -Infinity, so bestOption can never select it.
+   * This is a veto ON TOP of the soft risk weighting below — belt and
+   * suspenders. Defaults to false so existing callers are unaffected.
+   */
+  constraintViolated?: boolean;
 }
 
 /**
@@ -50,6 +65,9 @@ export interface UtilityInput {
  * Higher is better; the orchestrator picks the max among fallbacks.
  */
 export function utility(input: UtilityInput, w: UtilityWeights = DEFAULT_WEIGHTS): number {
+  // P0 hard-constraint veto: a violated safety invariant can never be traded
+  // away by the weighted objective. -Infinity keeps bestOption from picking it.
+  if (input.constraintViolated) return -Infinity;
   const value = clamp01(input.value);
   const importance = Math.max(clamp01(input.importance), w.importanceFloor);
   const distanceCost = w.distanceWeight * ((input.distanceBlocks ?? 0) / 100);
@@ -59,15 +77,22 @@ export function utility(input: UtilityInput, w: UtilityWeights = DEFAULT_WEIGHTS
   return (value * importance) / denominator;
 }
 
-/** Pick the option with the highest utility. Returns null if none. */
+/**
+ * Pick the option with the highest utility. Returns null if none.
+ * An optional `filter` can veto options before scoring (e.g. drop options
+ * whose path enters lava) — this runs before utility(), so hard constraints
+ * short-circuit the soft weighting.
+ */
 export function bestOption<T>(
   options: T[],
   score: (opt: T) => UtilityInput,
-  w: UtilityWeights = DEFAULT_WEIGHTS
+  w: UtilityWeights = DEFAULT_WEIGHTS,
+  filter?: (opt: T) => boolean
 ): T | null {
   let best: T | null = null;
   let bestScore = -Infinity;
   for (const opt of options) {
+    if (filter && !filter(opt)) continue;
     const s = utility(score(opt), w);
     if (s > bestScore) {
       bestScore = s;
@@ -75,6 +100,140 @@ export function bestOption<T>(
     }
   }
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// P0 HARD SAFETY CONSTRAINTS
+//
+// Soft risk only divides the utility score; a constraint VETOES. The invariants
+// below mirror the watchdog events, so "never drown / never die in lava / never
+// void-fall / never act at critical health" cannot be traded away by any
+// weighted objective. Evaluation is defensive: when the bot state is unknown
+// the constraint is treated as satisfied (safe), so callers that pass a partial
+// or fake bot never get falsely vetoed.
+// ---------------------------------------------------------------------------
+
+/**
+ * The minimal structural view of a bot that the constraints read. `mineflayer.Bot`
+ * satisfies this shape, and tests can pass partial fakes.
+ */
+export interface SafetyBot {
+  health?: number;
+  oxygenLevel?: number;
+  entity?: {
+    position?: { x: number; y: number; z: number };
+    /** Air left in ticks; 300 = full, 10 is ~0.5s left (watchdog parity). */
+    air?: number;
+  };
+  blockAt?: (pos: Vec3, extraInfos?: boolean) => { name?: string } | null | undefined;
+}
+
+export interface Constraint {
+  /** Stable identifier; matches the corresponding watchdog event name. */
+  name: string;
+  /** Returns true when the bot satisfies the invariant (safe). */
+  check: (bot: SafetyBot) => boolean;
+}
+
+/** Air/oxygen level below which the bot is drowning (watchdog default). */
+const DROWNING_THRESHOLD = 10;
+/** Health below which the bot is at critical risk (watchdog lowHealth default). */
+const LOW_HEALTH_THRESHOLD = 6;
+/** Y below which the bot is falling into the void (watchdog voidY default). */
+const VOID_Y = -60;
+
+export const HARD_CONSTRAINTS: Constraint[] = [
+  {
+    name: 'drowning',
+    check: (bot) => {
+      const oxygen = bot.oxygenLevel;
+      const air = bot.entity?.air;
+      if (typeof oxygen === 'number' && oxygen < DROWNING_THRESHOLD) return false;
+      if (typeof air === 'number' && air < DROWNING_THRESHOLD) return false;
+      return true;
+    }
+  },
+  {
+    name: 'lava',
+    check: (bot) => {
+      if (typeof bot.blockAt !== 'function') return true;
+      const pos = bot.entity?.position;
+      if (!pos) return true;
+      const x = Math.floor(pos.x);
+      const y = Math.floor(pos.y);
+      const z = Math.floor(pos.z);
+      const cells = [
+        new Vec3(x, y, z),
+        new Vec3(x + 1, y, z),
+        new Vec3(x - 1, y, z),
+        new Vec3(x, y, z + 1),
+        new Vec3(x, y, z - 1),
+        new Vec3(x, y - 1, z)
+      ];
+      for (const cell of cells) {
+        try {
+          const block = bot.blockAt(cell);
+          const name = block?.name;
+          if (name === 'lava' || name === 'flowing_lava') return false;
+        } catch {
+          // unreadable cell — do not veto on a failed read
+        }
+      }
+      return true;
+    }
+  },
+  {
+    name: 'void',
+    check: (bot) => {
+      const y = bot.entity?.position?.y;
+      if (typeof y !== 'number') return true;
+      return y >= VOID_Y;
+    }
+  },
+  {
+    name: 'low-health',
+    check: (bot) => {
+      const health = bot.health;
+      if (typeof health !== 'number') return true;
+      return health >= LOW_HEALTH_THRESHOLD;
+    }
+  }
+];
+
+export interface ConstraintCheckResult {
+  ok: boolean;
+  /** Names of the violated constraints (empty when ok is true). */
+  violated: string[];
+}
+
+/**
+ * Evaluate all hard constraints against the bot. Returns `{ ok: true }` when
+ * every invariant holds (or the bot state is unreadable), otherwise
+ * `{ ok: false, violated: string[] }` listing the broken invariants.
+ */
+export function checkConstraints(bot: SafetyBot | null | undefined): ConstraintCheckResult {
+  if (!bot) return { ok: true, violated: [] };
+  const violated: string[] = [];
+  for (const c of HARD_CONSTRAINTS) {
+    try {
+      if (!c.check(bot)) violated.push(c.name);
+    } catch {
+      // unreadable state — do not veto on a failed read
+    }
+  }
+  return violated.length > 0 ? { ok: false, violated } : { ok: true, violated: [] };
+}
+
+/**
+ * Mark a UtilityInput as vetoed when the bot violates any hard constraint.
+ * The returned input has `constraintViolated` set so utility() returns
+ * -Infinity and bestOption will never select it. Pass-through when safe.
+ */
+export function safeInput(bot: SafetyBot | null | undefined, input: UtilityInput): UtilityInput {
+  if (bot && !checkConstraints(bot).ok) {
+    return { ...input, constraintViolated: true };
+  }
+  return { ...input, constraintViolated: false };
 }
 
 function clamp01(n: number): number {

@@ -7,9 +7,9 @@ import { Block } from 'prismarine-block';
 import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { checkInterrupt, isInterruptError, getInterruptReason } from '../interrupt.js';
-import { GoalContext, GoalStep, GoalStepResult, GoalSpec } from '../goal-core.js';
+import { GoalContext, GoalStep, GoalStepResult, GoalSpec, WeightedFallback, pickBestFallback } from '../goal-core.js';
 import { orchestrateGoal } from '../goal-orchestrator.js';
-import { utility, estimateDistance, estimateRiskNearby } from '../utility.js';
+import { estimateDistance, estimateRiskNearby, safeInput } from '../utility.js';
 import * as gatherTools from './gather-tools.js';
 import {
   generateTemplate,
@@ -663,20 +663,22 @@ export function makeFoodStep(itemName: string, count: number): GoalStep {
         } catch {
           wheatPos = null;
         }
-        const options: Array<{ id: string; run: () => Promise<boolean>; input: Parameters<typeof utility>[0] }> = [
+        type FoodSourceId = 'harvest' | 'villager' | 'chest';
+        type FoodSourceOption = WeightedFallback & { id: FoodSourceId; run: () => Promise<boolean> };
+        const options: FoodSourceOption[] = [
           {
             id: 'harvest',
             run: async () => {
               await gatherIngredient(bot, recipe.ingredient, neededIngredient - countItemInInventory(bot, recipe.ingredient));
               return countItemInInventory(bot, recipe.ingredient) >= neededIngredient;
             },
-            input: {
+            input: safeInput(bot, {
               value: 0.8,
               importance: 0.9,
               distanceBlocks: wheatPos ? estimateDistance({ entity: { position: origin } }, wheatPos) : 60,
               timeSeconds: 12,
               risk: estimateRiskNearby(bot)
-            }
+            })
           },
           {
             id: 'villager',
@@ -684,13 +686,13 @@ export function makeFoodStep(itemName: string, count: number): GoalStep {
               const v = bot.nearestEntity?.((e: { name?: string }) => e.name === 'villager');
               return Boolean(v) && (await tryTradeIngredient(bot, recipe.ingredient, neededIngredient));
             },
-            input: {
+            input: safeInput(bot, {
               value: 0.9,
               importance: 0.8,
               distanceBlocks: 40,
               timeSeconds: 20,
               risk: estimateRiskNearby(bot)
-            }
+            })
           },
           {
             id: 'chest',
@@ -700,20 +702,25 @@ export function makeFoodStep(itemName: string, count: number): GoalStep {
               const chest = typeof cid === 'number' ? bot.findBlock?.({ matching: cid, maxDistance: 24 }) : null;
               return Boolean(chest) && (await tryWithdrawFromChest(bot, recipe.ingredient, neededIngredient));
             },
-            input: {
+            input: safeInput(bot, {
               value: 0.6,
               importance: 0.7,
               distanceBlocks: 24,
               timeSeconds: 8,
               risk: 0
-            }
+            })
           }
         ];
 
         let gathered = false;
-        // Try up to 2 highest-utility fallbacks, then escalate.
-        const ordered = [...options].sort((a, b) => utility(b.input) - utility(a.input)).slice(0, 2);
-        for (const opt of ordered) {
+        // Constraint-aware utility arbitration: try up to 2 best fallbacks, then escalate.
+        const remaining = new Map<FoodSourceId, FoodSourceOption>(options.map((o) => [o.id, o]));
+        for (let attempt = 0; attempt < 2 && remaining.size > 0; attempt++) {
+          const bestId = pickBestFallback(Array.from(remaining.values()));
+          if (bestId === null) break;
+          const opt = remaining.get(bestId as FoodSourceId);
+          remaining.delete(bestId as FoodSourceId);
+          if (!opt) continue;
           try {
             if (await opt.run()) {
               gathered = true;
@@ -1279,7 +1286,7 @@ export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mine
 
       if (outcome.status === 'blocked' && outcome.needDecision) {
         return factory.createResponse(
-          `BLOCKED: ${outcome.needDecision.reason}. Context: ${JSON.stringify(outcome.needDecision.context)}. Direct me or call run-task-resume.`
+          `BLOCKED: ${outcome.needDecision.reason}. Context: ${JSON.stringify(outcome.needDecision.context)}. Direct me (front brain) or call watchdog-resume to continue.`
         );
       }
 

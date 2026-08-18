@@ -11,7 +11,7 @@
  */
 import mineflayer from 'mineflayer';
 import { checkInterrupt, isInterruptError, getInterruptReason } from './interrupt.js';
-import { bestOption, UtilityInput } from './utility.js';
+import { bestOption, UtilityInput, checkConstraints } from './utility.js';
 
 export type GoalStepResult =
   | { status: 'done'; report: string }
@@ -58,6 +58,16 @@ export function createGoalContext(bot: mineflayer.Bot): GoalContext {
   };
 }
 
+/**
+ * P0 pre-flight safety gate. Checks the hard constraints (drowning / lava /
+ * void / low-health) against the bot. Safety is a SELECTION-TIME gate here,
+ * not just a runtime interrupt: a violated invariant blocks the goal before
+ * the step runs. Defensive: unknown bot state passes.
+ */
+export function preFlightSafetyCheck(bot: mineflayer.Bot): { ok: boolean; violated: string[] } {
+  return checkConstraints(bot);
+}
+
 export async function executeGoal(ctx: GoalContext, spec: GoalSpec): Promise<GoalOutcome> {
   for (const step of spec.steps) {
     try {
@@ -67,6 +77,23 @@ export async function executeGoal(ctx: GoalContext, spec: GoalSpec): Promise<Goa
         return { status: 'interrupted', report: `[INTERRUPTED] ${getInterruptReason() ?? 'Action cancelled by watchdog'}` };
       }
       throw err;
+    }
+
+    // P0 hard-constraint veto: never run a step while a safety invariant is
+    // violated. Returns a blocked outcome at intensity 3 (NEED_DECISION) so
+    // the front brain must resolve the danger before the goal continues.
+    const safety = preFlightSafetyCheck(ctx.bot);
+    if (!safety.ok) {
+      return {
+        status: 'blocked',
+        report: ctx.report.join(' → '),
+        needDecision: {
+          goal: spec.name,
+          step: step.name,
+          reason: 'constraint_violation',
+          context: { violated: safety.violated }
+        }
+      };
     }
 
     let result: GoalStepResult;

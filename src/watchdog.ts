@@ -19,7 +19,12 @@
 
 import type { Bot } from 'mineflayer';
 import { Vec3 } from 'vec3';
-import { setInterrupt, clearInterrupt, isInterrupted } from './interrupt.js';
+import {
+  setInterrupt,
+  clearInterrupt,
+  canPreempt,
+  InterruptPriority
+} from './interrupt.js';
 import { isHostileEntity, iterateEntities, distanceToEntity } from './tools/entity-tools.js';
 
 export const EVENT_NAMES = [
@@ -68,6 +73,41 @@ const EVENT_MODES: Record<string, string> = {
   reorient: 'reorient'
 };
 
+/**
+ * Interrupt priority per event. Reflex/survival events (death, void, lava,
+ * drowning, on-fire, creeper, fall, hostile, low-health, hunger) and player
+ * chat are P1; goal-policy events (night, inventory-full) are P3. Unknown
+ * events default to P1 so an unclassified trigger still preempts.
+ */
+export const PRIORITY_BY_EVENT: Record<string, InterruptPriority> = {
+  death: InterruptPriority.P1,
+  void: InterruptPriority.P1,
+  lava: InterruptPriority.P1,
+  drowning: InterruptPriority.P1,
+  'on-fire': InterruptPriority.P1,
+  creeper: InterruptPriority.P1,
+  fall: InterruptPriority.P1,
+  hostile: InterruptPriority.P1,
+  'low-health': InterruptPriority.P1,
+  hunger: InterruptPriority.P1,
+  reorient: InterruptPriority.P1,
+  chat: InterruptPriority.P1,
+  night: InterruptPriority.P3,
+  'inventory-full': InterruptPriority.P3
+};
+
+/**
+ * Whether the interrupted goal should be discarded or may be resumed after the
+ * interrupt. Defaults to 'resumable'; events that permanently invalidate the
+ * current plan (death, forced reorientation) mark it 'invalid'.
+ */
+const DISPOSITION_BY_EVENT: Record<string, 'resumable' | 'invalid'> = {
+  death: 'invalid',
+  reorient: 'invalid'
+};
+
+export type GoalDisposition = 'resumable' | 'invalid';
+
 type Entity = ReturnType<Bot['nearestEntity']>;
 
 export interface WatchdogListener {
@@ -86,6 +126,12 @@ export interface WatchdogStatus {
   enabledEvents: string[];
   lastTrigger: WatchdogTrigger | null;
   triggerCount: number;
+  /** Cooldown (ms) suppressing re-fires of the SAME event (0 = disabled). */
+  cooldownMs?: number;
+  /** Rolling window of recent triggers (oldest first, bounded). */
+  recentTriggers?: WatchdogTrigger[];
+  /** How the interrupted goal should be treated after this interrupt. */
+  goalDisposition?: GoalDisposition;
 }
 
 export interface WatchdogStartOptions {
@@ -105,6 +151,22 @@ export class Watchdog {
   enabledEvents: Set<string> = new Set();
   thresholds: Record<string, number> = {};
   listener: WatchdogListener | null = null;
+  /** Timestamp of the last time each event fired (cooldown bookkeeping). */
+  lastTriggerAt: Record<string, number> = {};
+  /** Per-event cooldown (ms) suppressing re-fires of the same event (0 = off). */
+  cooldownMs = 0;
+  /** Consecutive ticks each polled event has been true (hysteresis). */
+  pendingTickCount: Record<string, number> = {};
+  /** Rolling window of recent triggers (bounded, oldest first). */
+  recentTriggers: WatchdogTrigger[] = [];
+  /** Max entries retained in recentTriggers. */
+  maxRecentTriggers = 20;
+  /** How the interrupted goal should be treated (resumable by default). */
+  goalDisposition: GoalDisposition = 'resumable';
+  /** Timestamp until which the current action is committed (min-commitment). */
+  commitmentUntil: number | null = null;
+  /** Priority of the committed action (min-commitment floor). */
+  committedPriority: InterruptPriority | null = null;
   private bot: Bot | null = null;
   /** Bound background chat handler (player -> interrupt). */
   private chatHandler: ((username: string, message: string) => void) | null = null;
@@ -135,6 +197,51 @@ export class Watchdog {
 
   setThreshold(key: string, value: number): void {
     this.thresholds[key] = value;
+  }
+
+  /**
+   * Set the per-event cooldown (ms). While an event is inside its cooldown the
+   * SAME event will not fire again. 0 (default) disables the guard.
+   */
+  setCooldownMs(ms: number): void {
+    this.cooldownMs = ms;
+  }
+
+  /**
+   * Set hysteresis for a polled event: the condition must be true for `ticks`
+   * consecutive ticks before it fires. Default 1 = current behavior. When
+   * `event` is omitted the value becomes the global default for all polled
+   * events (per-event values win).
+   */
+  setHysteresis(ticks: number, event?: string): void {
+    this.thresholds[event ? `hysteresis.${event}` : 'hysteresis'] = ticks;
+  }
+
+  /**
+   * Record a minimum-commitment window for the current action. While now <
+   * `ms` from this call, interrupts of SAME-OR-LOWER priority than
+   * `priority` are suppressed (P0/P1 safety/reflex interrupts still preempt).
+   * The action's own priority defaults to P2.
+   */
+  noteCommitment(ms: number, priority: InterruptPriority = InterruptPriority.P2): void {
+    this.commitmentUntil = Date.now() + ms;
+    this.committedPriority = priority;
+  }
+
+  /** Clear any active minimum-commitment window. */
+  clearCommitment(): void {
+    this.commitmentUntil = null;
+    this.committedPriority = null;
+  }
+
+  /** How the most recent interrupt wants the goal treated ('resumable' | 'invalid'). */
+  getGoalDisposition(): GoalDisposition {
+    return this.goalDisposition;
+  }
+
+  /** Rolling window of recent triggers (oldest first). */
+  getRecentTriggers(): WatchdogTrigger[] {
+    return [...this.recentTriggers];
   }
 
   startWatchdog(opts: WatchdogStartOptions = {}): void {
@@ -179,6 +286,7 @@ export class Watchdog {
     this.chatHandler = (username: string, message: string) => {
       if (this.isSelfChat(username)) return;
       if (!this.enabledEvents.has('chat')) return;
+      if (!canPreempt(this.priorityFor('chat'))) return;
       this.trigger('chat', `PLAYER COMMAND from ${username}: "${message}" — CANCEL current action; switch to LISTEN mode and respond to the player.`);
     };
     // The bot emits 'chat' with (username, message) for every inbound chat.
@@ -205,7 +313,8 @@ export class Watchdog {
    * tick loop (which remains the fallback for events with no listener: lava,
    * fall, void, night, hunger, inventory-full). Idempotent. Each handler:
    *
-   *   - no-ops while an interrupt is already pending (isInterrupted())
+   *   - no-ops while an equal-or-higher-priority interrupt is already pending
+   *     (canPreempt())
    *   - guards on the event being enabled (enabledEvents)
    *   - triggers with an event-specific directive + mode
    */
@@ -215,7 +324,7 @@ export class Watchdog {
     this.eventListening = true;
     const handlers = (this.eventHandler = {
       death: () => {
-        if (isInterrupted()) return;
+        if (!canPreempt(this.priorityFor('death'))) return;
         if (!this.enabledEvents.has('death')) return;
         this.trigger(
           'death',
@@ -224,7 +333,7 @@ export class Watchdog {
         this.defensiveRespawn();
       },
       health: () => {
-        if (isInterrupted()) return;
+        if (!canPreempt(this.priorityFor('low-health'))) return;
         if (!this.enabledEvents.has('low-health')) return;
         const health = this.bot?.health;
         const limit = this.threshold('lowHealth', 6);
@@ -235,7 +344,7 @@ export class Watchdog {
         );
       },
       entityHurt: (entity: unknown) => {
-        if (isInterrupted()) return;
+        if (!canPreempt(this.priorityFor('low-health'))) return;
         if (!this.enabledEvents.has('low-health')) return;
         const bot = this.bot;
         const selfId = bot?.entity?.id;
@@ -250,7 +359,7 @@ export class Watchdog {
         );
       },
       forcedMove: () => {
-        if (isInterrupted()) return;
+        if (!canPreempt(this.priorityFor('reorient'))) return;
         if (!this.enabledEvents.has('reorient')) return;
         this.trigger(
           'reorient',
@@ -258,7 +367,7 @@ export class Watchdog {
         );
       },
       breath: () => {
-        if (isInterrupted()) return;
+        if (!canPreempt(this.priorityFor('drowning'))) return;
         if (!this.enabledEvents.has('drowning')) return;
         const oxygen = this.bot?.oxygenLevel;
         if (typeof oxygen !== 'number' || oxygen >= 10) return;
@@ -351,7 +460,10 @@ export class Watchdog {
       mode: this.mode,
       enabledEvents: Array.from(this.enabledEvents),
       lastTrigger: this.lastTrigger,
-      triggerCount: this.triggerCount
+      triggerCount: this.triggerCount,
+      cooldownMs: this.cooldownMs,
+      recentTriggers: [...this.recentTriggers],
+      goalDisposition: this.goalDisposition
     };
   }
 
@@ -368,6 +480,13 @@ export class Watchdog {
     this.enabledEvents = new Set();
     this.thresholds = {};
     this.listener = null;
+    this.lastTriggerAt = {};
+    this.cooldownMs = 0;
+    this.pendingTickCount = {};
+    this.recentTriggers = [];
+    this.goalDisposition = 'resumable';
+    this.commitmentUntil = null;
+    this.committedPriority = null;
     this.bot = null;
     clearInterrupt();
   }
@@ -376,23 +495,56 @@ export class Watchdog {
     if (!this.running) return;
     const bot = this.bot;
     if (!bot || !bot.entity) return;
-    if (isInterrupted()) return;
     for (const event of EVENT_PRIORITY) {
       if (!this.enabledEvents.has(event)) continue;
+      // Skip events that a pending interrupt would not allow to preempt
+      // (same-or-higher-priority interrupts already pending). Lower-priority
+      // pending interrupts (e.g. night) do NOT block higher-priority ones.
+      if (!canPreempt(this.priorityFor(event))) continue;
       const result = this.evaluateEvent(event);
       if (result) {
+        // HYSTERESIS: the condition must persist for N consecutive ticks.
+        const ticks = this.hysteresisFor(event);
+        const count = (this.pendingTickCount[event] ?? 0) + 1;
+        this.pendingTickCount[event] = count;
+        if (count < ticks) continue;
+        this.pendingTickCount[event] = 0;
         this.trigger(event, result.directive);
         return;
+      } else {
+        this.pendingTickCount[event] = 0;
       }
     }
   }
 
   trigger(event: string, directive: string): void {
+    const now = Date.now();
+    const priority = this.priorityFor(event);
+
+    // COOLDOWN: suppress re-firing the SAME event until cooldownMs has elapsed.
+    const cooldown = this.cooldownFor(event);
+    const lastAt = this.lastTriggerAt[event];
+    if (cooldown > 0 && lastAt !== undefined && now - lastAt < cooldown) {
+      return;
+    }
+
+    // MIN-COMMITMENT: same-or-lower-priority interrupts are suppressed while
+    // the current action is committed (P0/P1 safety/reflex always preempt).
+    if (this.commitmentSuppresses(priority)) {
+      return;
+    }
+
     this.triggerCount++;
-    this.lastTrigger = { event, at: Date.now(), message: directive };
+    this.lastTrigger = { event, at: now, message: directive };
+    this.lastTriggerAt[event] = now;
+    this.recentTriggers.push(this.lastTrigger);
+    if (this.recentTriggers.length > this.maxRecentTriggers) {
+      this.recentTriggers.shift();
+    }
+    this.goalDisposition = DISPOSITION_BY_EVENT[event] ?? 'resumable';
     this.prevMode = this.mode;
     this.mode = EVENT_MODES[event] ?? event;
-    setInterrupt(directive);
+    setInterrupt(directive, priority);
     if (this.listener) this.listener(directive, event);
   }
 
@@ -413,6 +565,39 @@ export class Watchdog {
   private threshold(key: string, fallback: number): number {
     const value = this.thresholds[key];
     return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  }
+
+  /** Interrupt priority for an event (unknown events default to P1). */
+  private priorityFor(event: string): InterruptPriority {
+    return PRIORITY_BY_EVENT[event] ?? InterruptPriority.P1;
+  }
+
+  /** Effective cooldown for an event (threshold `cooldownMs` wins over field). */
+  private cooldownFor(_event: string): number {
+    const fromThresholds = this.thresholds['cooldownMs'];
+    const value = typeof fromThresholds === 'number' ? fromThresholds : this.cooldownMs;
+    return Number.isFinite(value) && value >= 0 ? value : 0;
+  }
+
+  /** Hysteresis (consecutive ticks required) for a polled event. Default 1. */
+  private hysteresisFor(event: string): number {
+    const perEvent = this.thresholds[`hysteresis.${event}`];
+    if (typeof perEvent === 'number' && Number.isFinite(perEvent)) return perEvent;
+    const global = this.thresholds['hysteresis'];
+    if (typeof global === 'number' && Number.isFinite(global)) return global;
+    return 1;
+  }
+
+  /**
+   * True when a minimum-commitment window is active and `priority` is the
+   * same-or-lower priority than the committed action (so it is suppressed).
+   * P0/P1 safety/reflex interrupts are never suppressed by commitment.
+   */
+  private commitmentSuppresses(priority: InterruptPriority): boolean {
+    if (this.commitmentUntil === null || this.committedPriority === null) return false;
+    if (priority <= InterruptPriority.P1) return false;
+    if (Date.now() >= this.commitmentUntil) return false;
+    return priority >= this.committedPriority;
   }
 
   private evaluateEvent(event: string): { directive: string } | null {

@@ -337,7 +337,7 @@ test.serial('run-goal bread blocks with needDecision when no wheat is available'
   t.false(!!result.isError);
   t.true(result.content[0].text.includes('BLOCKED: no wheat available'));
   t.true(result.content[0].text.includes('"missing":"wheat"'));
-  t.true(result.content[0].text.includes('run-task-resume'));
+  t.true(result.content[0].text.includes('watchdog-resume'));
   t.true(findBlocks.called);
 });
 
