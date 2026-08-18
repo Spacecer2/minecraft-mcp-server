@@ -37,6 +37,7 @@ import { registerCombatTools } from './tools/combat-tools.js';
 import { registerFarmingTools } from './tools/farming-tools.js';
 import { registerMotionTools } from './tools/motion-tools.js';
 import { registerVisionTools } from './tools/vision-tools.js';
+import { registerWatchdogTools } from './tools/watchdog-tools.js';
 import { z } from "zod";
 import * as fs from 'node:fs';
 
@@ -176,6 +177,7 @@ async function main() {
   registerFarmingTools(factory, getBot);
   registerMotionTools(factory, getBot);
   registerVisionTools(factory, getBot);
+  registerWatchdogTools(factory, getBot);
 
   process.stdin.on('end', () => {
     manager.cleanup();

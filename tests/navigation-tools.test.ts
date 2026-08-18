@@ -6,6 +6,7 @@ import type { BotConnection } from '../src/bot-connection.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
+import { setInterrupt, clearInterrupt } from '../src/interrupt.js';
 
 function setup(mockBot: Partial<mineflayer.Bot>) {
   const mockServer = {
@@ -293,4 +294,52 @@ test.serial('goto-entity times out when target never reached and stops pathfinde
   t.true(result.isError);
   t.true(result.content[0].text.includes('Timed out following zombie after 500ms'));
   t.true((mockBot.pathfinder.stop as sinon.SinonStub).calledOnce);
+});
+
+test.serial('move-toward returns INTERRUPTED when the interrupt flag is set', async (t) => {
+  clearInterrupt();
+  setInterrupt('test');
+  t.teardown(() => clearInterrupt());
+
+  const mockBot = {
+    pathfinder: {
+      goto: sinon.stub().resolves(),
+      stop: sinon.stub()
+    },
+    entity: {
+      position: new Vec3(10, 64, 10)
+    }
+  } as unknown as Partial<mineflayer.Bot>;
+  const { toolCalls } = setup(mockBot);
+  const executor = executorFor(toolCalls, 'move-toward');
+
+  const result = await executor({ dx: 5, dz: -2 });
+
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('INTERRUPTED'));
+  t.true((mockBot.pathfinder!.goto as sinon.SinonStub).notCalled);
+});
+
+test.serial('goto-named returns INTERRUPTED when the interrupt flag is set', async (t) => {
+  clearInterrupt();
+  setInterrupt('test');
+  t.teardown(() => clearInterrupt());
+
+  const mockBot = {
+    pathfinder: {
+      goto: sinon.stub().resolves(),
+      stop: sinon.stub()
+    },
+    entity: {
+      position: new Vec3(10, 64, 10)
+    }
+  } as unknown as Partial<mineflayer.Bot>;
+  const { toolCalls } = setup(mockBot);
+  const gotoExecutor = executorFor(toolCalls, 'goto-named');
+
+  const result = await gotoExecutor({ name: 'home' });
+
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('INTERRUPTED'));
+  t.true((mockBot.pathfinder!.goto as sinon.SinonStub).notCalled);
 });

@@ -12,6 +12,7 @@ import {
   TemplateLayout,
   TemplatePalette
 } from './template-registry.js';
+import { checkInterrupt, isInterruptError, getInterruptReason } from '../interrupt.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 
@@ -254,17 +255,25 @@ export function registerPlanTools(factory: ToolFactory, getBot: () => mineflayer
 
       let placed = 0;
       let failed = 0;
-      for (const step of toExecute) {
-        const result = await placeAt(bot, new Vec3(step.x, step.y, step.z), step.face);
-        if (result.ok) {
-          step.status = 'placed';
-          placed++;
-        } else {
-          step.status = 'failed';
-          step.reason = result.reason;
-          failed++;
-          break;
+      try {
+        for (const step of toExecute) {
+          checkInterrupt();
+          const result = await placeAt(bot, new Vec3(step.x, step.y, step.z), step.face);
+          if (result.ok) {
+            step.status = 'placed';
+            placed++;
+          } else {
+            step.status = 'failed';
+            step.reason = result.reason;
+            failed++;
+            break;
+          }
         }
+      } catch (error) {
+        if (isInterruptError(error)) {
+          return factory.createErrorResponse(`Executed ${placed + failed} step(s); INTERRUPTED: ${getInterruptReason() ?? 'Action cancelled by watchdog'}.`);
+        }
+        throw error;
       }
 
       const remaining = plan.steps.filter(s => s.status === 'pending').length;

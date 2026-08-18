@@ -6,6 +6,7 @@ import { BotConnection } from '../src/bot-connection.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
+import { setInterrupt, clearInterrupt } from '../src/interrupt.js';
 
 test('registerPositionTools registers get-position tool', (t) => {
   const mockServer = {
@@ -439,4 +440,44 @@ test('move-to-position returns void error when bot is below the world floor', as
   t.true(result.isError);
   t.true(result.content[0].text.includes('below the world floor'));
   t.true(result.content[0].text.includes('y=-70'));
+});
+
+test.serial('move-to-position returns INTERRUPTED when the interrupt flag is set', async (t) => {
+  clearInterrupt();
+  setInterrupt('test');
+  t.teardown(() => clearInterrupt());
+
+  const mockServer = {
+    tool: sinon.stub()
+  } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const mockBot = {
+    pathfinder: {
+      goto: sinon.stub().resolves(),
+      stop: sinon.stub()
+    },
+    entity: {
+      position: new Vec3(10, 20, 30)
+    }
+  } as Partial<mineflayer.Bot>;
+  const getBot = () => mockBot as mineflayer.Bot;
+
+  registerPositionTools(factory, getBot);
+
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const moveToPositionCall = toolCalls.find(call => call.args[0] === 'move-to-position');
+  const executor = moveToPositionCall!.args[3];
+
+  const result = await executor({ x: 100, y: 64, z: 200 });
+
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('INTERRUPTED'));
 });

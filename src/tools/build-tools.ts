@@ -4,6 +4,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
+import { checkInterrupt, isInterruptError, getInterruptReason } from '../interrupt.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 
@@ -89,18 +90,26 @@ export function registerBuildTools(factory: ToolFactory, getBot: () => mineflaye
       let placed = 0;
       const failures: string[] = [];
 
-      for (const entry of blocks) {
-        const pos = new Vec3(entry.x, entry.y, entry.z).floored();
-        const result = await placeAt(bot, pos, entry.face);
-        if (result.ok) {
-          placed++;
-        } else {
-          failures.push(`couldn't place (${pos.x},${pos.y},${pos.z}): ${result.reason}`);
+      try {
+        for (const entry of blocks) {
+          checkInterrupt();
+          const pos = new Vec3(entry.x, entry.y, entry.z).floored();
+          const result = await placeAt(bot, pos, entry.face);
+          if (result.ok) {
+            placed++;
+          } else {
+            failures.push(`couldn't place (${pos.x},${pos.y},${pos.z}): ${result.reason}`);
+          }
         }
-      }
 
-      const failureText = failures.length > 0 ? `: ${failures.join('; ')}` : '';
-      return factory.createResponse(`Placed ${placed} block(s); failed ${failures.length}${failureText}`);
+        const failureText = failures.length > 0 ? `: ${failures.join('; ')}` : '';
+        return factory.createResponse(`Placed ${placed} block(s); failed ${failures.length}${failureText}`);
+      } catch (error) {
+        if (isInterruptError(error)) {
+          return factory.createErrorResponse(`Placed ${placed}/${blocks.length}; INTERRUPTED: ${getInterruptReason() ?? 'Action cancelled by watchdog'}`);
+        }
+        throw error;
+      }
     }
   );
 
@@ -132,29 +141,37 @@ export function registerBuildTools(factory: ToolFactory, getBot: () => mineflaye
       let filled = 0;
       const failures: string[] = [];
 
-      for (let x = minX; x <= maxX; x++) {
-        for (let y = minY; y <= maxY; y++) {
-          for (let z = minZ; z <= maxZ; z++) {
-            const pos = new Vec3(x, y, z);
-            if (pos.equals(botPos) || pos.equals(botPos.offset(0, 1, 0))) {
-              continue;
-            }
-            const current = bot.blockAt(pos);
-            if (current && current.name === blockType) {
-              continue;
-            }
-            const result = await placeAt(bot, pos);
-            if (result.ok) {
-              filled++;
-            } else {
-              failures.push(`couldn't place (${x},${y},${z}): ${result.reason}`);
+      try {
+        for (let x = minX; x <= maxX; x++) {
+          for (let y = minY; y <= maxY; y++) {
+            for (let z = minZ; z <= maxZ; z++) {
+              checkInterrupt();
+              const pos = new Vec3(x, y, z);
+              if (pos.equals(botPos) || pos.equals(botPos.offset(0, 1, 0))) {
+                continue;
+              }
+              const current = bot.blockAt(pos);
+              if (current && current.name === blockType) {
+                continue;
+              }
+              const result = await placeAt(bot, pos);
+              if (result.ok) {
+                filled++;
+              } else {
+                failures.push(`couldn't place (${x},${y},${z}): ${result.reason}`);
+              }
             }
           }
         }
-      }
 
-      const failureText = failures.length > 0 ? `; failed ${failures.length}: ${failures.join('; ')}` : '';
-      return factory.createResponse(`Filled ${filled} block(s) with ${blockType}${failureText}`);
+        const failureText = failures.length > 0 ? `; failed ${failures.length}: ${failures.join('; ')}` : '';
+        return factory.createResponse(`Filled ${filled} block(s) with ${blockType}${failureText}`);
+      } catch (error) {
+        if (isInterruptError(error)) {
+          return factory.createErrorResponse(`Placed ${filled}/${volume}; INTERRUPTED: ${getInterruptReason() ?? 'Action cancelled by watchdog'}`);
+        }
+        throw error;
+      }
     }
   );
 
@@ -175,18 +192,26 @@ export function registerBuildTools(factory: ToolFactory, getBot: () => mineflaye
       let placed = 0;
       const failures: string[] = [];
 
-      for (const entry of offsets) {
-        const pos = new Vec3(botPos.x + entry.dx, botPos.y + entry.dy, botPos.z + entry.dz).floored();
-        const result = await placeAt(bot, pos, entry.face);
-        if (result.ok) {
-          placed++;
-        } else {
-          failures.push(`couldn't place (${pos.x},${pos.y},${pos.z}): ${result.reason}`);
+      try {
+        for (const entry of offsets) {
+          checkInterrupt();
+          const pos = new Vec3(botPos.x + entry.dx, botPos.y + entry.dy, botPos.z + entry.dz).floored();
+          const result = await placeAt(bot, pos, entry.face);
+          if (result.ok) {
+            placed++;
+          } else {
+            failures.push(`couldn't place (${pos.x},${pos.y},${pos.z}): ${result.reason}`);
+          }
         }
-      }
 
-      const failureText = failures.length > 0 ? `: ${failures.join('; ')}` : '';
-      return factory.createResponse(`Placed ${placed} block(s); failed ${failures.length}${failureText}`);
+        const failureText = failures.length > 0 ? `: ${failures.join('; ')}` : '';
+        return factory.createResponse(`Placed ${placed} block(s); failed ${failures.length}${failureText}`);
+      } catch (error) {
+        if (isInterruptError(error)) {
+          return factory.createErrorResponse(`Placed ${placed}/${offsets.length}; INTERRUPTED: ${getInterruptReason() ?? 'Action cancelled by watchdog'}`);
+        }
+        throw error;
+      }
     }
   );
 }

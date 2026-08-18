@@ -4,6 +4,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
+import { checkInterrupt, isInterruptError, getInterruptReason } from '../interrupt.js';
 
 type Waypoint = { x: number; y: number; z: number };
 type Condition = 'night' | 'day' | 'hungry' | 'full-health' | 'low-health' | 'not-sleeping';
@@ -82,6 +83,7 @@ export function registerMotionTools(factory: ToolFactory, getBot: () => mineflay
       step: z.coerce.number().optional().describe("Probe interval in blocks (default: 4)")
     },
     async ({ x, y, z, step = 4 }: { x: number; y: number; z: number; step?: number }) => {
+      checkInterrupt();
       const bot = getBot();
       const start = bot.entity.position;
       const sx = Math.floor(start.x);
@@ -146,18 +148,27 @@ export function registerMotionTools(factory: ToolFactory, getBot: () => mineflay
       const bot = getBot();
       let completed = 0;
 
-      for (let i = 0; i < wps.length; i++) {
-        const wp = wps[i];
-        const legResult = await gotoLeg(bot, wp.x, wp.y, wp.z, range, timeoutMs);
-        if (legResult === 'timed-out') {
-          const pos = bot.entity.position;
-          return factory.createErrorResponse(`Stopped at leg ${i + 1} (timed out); now at (${pos.x}, ${pos.y}, ${pos.z})`);
+      try {
+        for (let i = 0; i < wps.length; i++) {
+          checkInterrupt();
+          const wp = wps[i];
+          const legResult = await gotoLeg(bot, wp.x, wp.y, wp.z, range, timeoutMs);
+          if (legResult === 'timed-out') {
+            const pos = bot.entity.position;
+            return factory.createErrorResponse(`Stopped at leg ${i + 1} (timed out); now at (${pos.x}, ${pos.y}, ${pos.z})`);
+          }
+          completed++;
         }
-        completed++;
-      }
 
-      const pos = bot.entity.position;
-      return factory.createResponse(`Walked ${completed}/${wps.length} legs; now at (${pos.x}, ${pos.y}, ${pos.z})`);
+        const pos = bot.entity.position;
+        return factory.createResponse(`Walked ${completed}/${wps.length} legs; now at (${pos.x}, ${pos.y}, ${pos.z})`);
+      } catch (error) {
+        if (isInterruptError(error)) {
+          bot.pathfinder.stop();
+          return factory.createErrorResponse(`Walked ${completed}/${wps.length} legs; INTERRUPTED: ${getInterruptReason() ?? 'Action cancelled by watchdog'}.`);
+        }
+        throw error;
+      }
     }
   );
 

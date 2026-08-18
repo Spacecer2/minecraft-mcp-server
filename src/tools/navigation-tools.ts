@@ -3,6 +3,7 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { ToolFactory } from '../tool-factory.js';
+import { checkInterrupt } from '../interrupt.js';
 
 type Waypoint = { x: number; y: number; z: number };
 type Heading = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
@@ -86,6 +87,7 @@ export function registerNavigationTools(factory: ToolFactory, getBot: () => mine
       timeoutMs: z.number().int().min(50).optional().describe("Timeout in milliseconds before cancelling (min: 50, default: no timeout)")
     },
     async ({ dx, dy = 0, dz, range = 1, timeoutMs }: { dx: number; dy?: number; dz: number; range?: number; timeoutMs?: number }) => {
+      checkInterrupt();
       const bot = getBot();
       const current = bot.entity.position;
       const tx = Math.floor(current.x) + dx;
@@ -124,6 +126,7 @@ export function registerNavigationTools(factory: ToolFactory, getBot: () => mine
       timeoutMs: z.number().int().min(50).optional().describe("Timeout in milliseconds before cancelling (default: 15000)")
     },
     async ({ entityType, timeoutMs = 15000 }: { entityType: string; timeoutMs?: number }) => {
+      checkInterrupt();
       const bot = getBot();
       const type = entityType.toLowerCase();
       const entity = bot.nearestEntity((e) => {
@@ -184,6 +187,7 @@ export function registerNavigationTools(factory: ToolFactory, getBot: () => mine
       timeoutMs: z.number().int().min(50).optional().describe("Timeout in milliseconds before cancelling (min: 50, default: no timeout)")
     },
     async ({ name, range = 2, timeoutMs }: { name: string; range?: number; timeoutMs?: number }) => {
+      checkInterrupt();
       const wp = waypoints.get(name);
       if (!wp) {
         throw new Error(`No saved location named ${name}`);

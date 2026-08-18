@@ -5,6 +5,7 @@ const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates, validateWorldY } from './coordinate-utils.js';
+import { checkInterrupt, isInterruptError } from '../interrupt.js';
 
 type Direction = 'forward' | 'back' | 'left' | 'right';
 
@@ -36,6 +37,8 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
       timeoutMs: z.number().int().min(50).optional().describe("Timeout in milliseconds before cancelling (min: 50, default: no timeout)")
     },
     async ({ x, y, z, range = 1, timeoutMs }: { x: number; y: number; z: number; range?: number; timeoutMs?: number }) => {
+      checkInterrupt();
+
       ({ x, y, z } = coerceCoordinates(x, y, z));
       validateWorldY(y);
 
@@ -71,6 +74,11 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
         }
         return factory.createResponse(`Successfully moved to position near (${x}, ${y}, ${z}); now at (${pos.x}, ${pos.y}, ${pos.z})`);
       } catch (error) {
+        if (isInterruptError(error)) {
+          bot.pathfinder.stop();
+          gotoPromise.catch(() => {});
+          return factory.createErrorResponse(error instanceof Error ? error.message : String(error));
+        }
         if (timedOut) {
           const pos = bot.entity.position;
           throw new Error(`Move timed out after ${timeoutMs}ms. Current position: (${pos.x}, ${pos.y}, ${pos.z}), target: (${x}, ${y}, ${z})`);

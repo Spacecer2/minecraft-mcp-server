@@ -6,6 +6,7 @@ import type { BotConnection } from '../src/bot-connection.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
+import { setInterrupt, clearInterrupt } from '../src/interrupt.js';
 
 function setup(mockBot: Partial<mineflayer.Bot>) {
   const mockServer = {
@@ -117,6 +118,48 @@ test.serial('walk-path stops at a leg that times out', async (t) => {
   t.true(result.isError);
   t.true(result.content[0].text.includes('Stopped at leg 1 (timed out)'));
   t.true((mockBot.pathfinder!.stop as sinon.SinonStub).calledOnce);
+});
+
+test.serial('walk-path returns INTERRUPTED when the interrupt flag is set and stops pathfinder', async (t) => {
+  clearInterrupt();
+  setInterrupt('test');
+  t.teardown(() => clearInterrupt());
+
+  const mockBot = {
+    pathfinder: {
+      goto: sinon.stub().resolves(),
+      stop: sinon.stub()
+    },
+    entity: { position: new Vec3(10, 64, 10) }
+  } as unknown as Partial<mineflayer.Bot>;
+  const { toolCalls } = setup(mockBot);
+  const executor = executorFor(toolCalls, 'walk-path');
+
+  const result = await executor({ waypoints: [{ x: 1, y: 64, z: 2 }, { x: 5, y: 64, z: 6 }] });
+
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('Walked 0/2 legs'));
+  t.true(result.content[0].text.includes('INTERRUPTED'));
+  t.true((mockBot.pathfinder!.goto as sinon.SinonStub).notCalled);
+  t.true((mockBot.pathfinder!.stop as sinon.SinonStub).calledOnce);
+});
+
+test.serial('find-safe-path returns INTERRUPTED when the interrupt flag is set', async (t) => {
+  clearInterrupt();
+  setInterrupt('test');
+  t.teardown(() => clearInterrupt());
+
+  const mockBot = {
+    entity: { position: new Vec3(0, 64, 0) },
+    blockAt: sinon.stub().returns({ name: 'air' })
+  } as unknown as Partial<mineflayer.Bot>;
+  const { toolCalls } = setup(mockBot);
+  const executor = executorFor(toolCalls, 'find-safe-path');
+
+  const result = await executor({ x: 100, y: 64, z: 0 });
+
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('INTERRUPTED'));
 });
 
 test.serial('wait blocks for the requested seconds', async (t) => {

@@ -6,6 +6,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { BotConnection } from '../src/bot-connection.js';
 import type mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
+import { setInterrupt, clearInterrupt } from '../src/interrupt.js';
 
 function makePlanBot() {
   const botPos = new Vec3(0, 70, 0);
@@ -222,4 +223,22 @@ test.serial('abort-plan with no id clears all plans', async (t) => {
 
   const status = await planStatus({});
   t.true(!!status.isError);
+});
+
+test.serial('execute-plan returns INTERRUPTED when the interrupt flag is set', async (t) => {
+  clearInterrupt();
+  setInterrupt('test');
+  t.teardown(() => clearInterrupt());
+
+  const { mockServer, placeBlock } = setup();
+  const planBuild = getExecutor(mockServer, 'plan-build');
+  const execute = getExecutor(mockServer, 'execute-plan');
+
+  await planBuild({ name: 'test-house', x: 10, y: 64, z: 20, template: 'house' });
+  const result = await execute({ steps: 8 });
+
+  t.true(!!result.isError);
+  t.true(result.content[0].text.includes('Executed 0 step(s); INTERRUPTED'));
+  t.true(result.content[0].text.includes('INTERRUPTED'));
+  t.is(placeBlock.callCount, 0);
 });

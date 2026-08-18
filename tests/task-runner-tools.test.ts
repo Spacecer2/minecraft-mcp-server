@@ -7,6 +7,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { BotConnection } from '../src/bot-connection.js';
 import type mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
+import { setInterrupt, clearInterrupt } from '../src/interrupt.js';
 
 type Executor = (args: Record<string, unknown>) => Promise<{
   content: { type: string; text: string }[];
@@ -225,4 +226,25 @@ test.serial('abort-task marks the task failed and clears its plan', async (t) =>
   const st = await status({});
   t.true(st.content[0].text.includes('Status: failed'));
   t.true(st.content[0].text.includes('Error: aborted by user'));
+});
+
+test.serial('run-task-step returns INTERRUPTED and leaves the task resumable', async (t) => {
+  clearInterrupt();
+  setInterrupt('test');
+  t.teardown(() => clearInterrupt());
+
+  const { bot } = makeBuildBot();
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
+  const step = getExecutor('run-task-step');
+  const status = getExecutor('run-task-status');
+
+  await runGoal({ goal: 'build a house', x: 10, y: 64, z: 20 });
+  const result = await step({ steps: 5 });
+
+  t.true(!!result.isError);
+  t.true(result.content[0].text.includes('INTERRUPTED'));
+
+  const st = await status({});
+  t.true(st.content[0].text.includes('Status: running'));
 });

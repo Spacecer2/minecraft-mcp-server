@@ -6,6 +6,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { BotConnection } from '../src/bot-connection.js';
 import type mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
+import { setInterrupt, clearInterrupt } from '../src/interrupt.js';
 
 function setup() {
   const mockServer = { tool: sinon.stub() } as unknown as McpServer;
@@ -172,4 +173,44 @@ test('place-relative fails when an offset points at the bot position', async (t)
 
   t.false(!!result.isError);
   t.true(result.content[0].text.includes('Placed 0 block(s); failed 1'));
+});
+
+test.serial('place-blocks returns INTERRUPTED when the interrupt flag is set', async (t) => {
+  clearInterrupt();
+  setInterrupt('test');
+  t.teardown(() => clearInterrupt());
+
+  const { mockServer, factory } = setup();
+  const { bot, placeBlock } = makePlaceBot({ position: new Vec3(10, 64, 20) });
+  registerBuildTools(factory, () => bot as mineflayer.Bot);
+
+  const executor = getExecutor(mockServer, 'place-blocks');
+  const result = await executor({
+    blocks: [
+      { x: 11, y: 64, z: 20 },
+      { x: 12, y: 64, z: 20 }
+    ]
+  });
+
+  t.true(!!result.isError);
+  t.true(result.content[0].text.includes('Placed 0/2'));
+  t.true(result.content[0].text.includes('INTERRUPTED'));
+  t.is(placeBlock.callCount, 0);
+});
+
+test.serial('fill-area returns INTERRUPTED when the interrupt flag is set', async (t) => {
+  clearInterrupt();
+  setInterrupt('test');
+  t.teardown(() => clearInterrupt());
+
+  const { mockServer, factory } = setup();
+  const { bot } = makePlaceBot({ position: new Vec3(100, 64, 100) });
+  registerBuildTools(factory, () => bot as mineflayer.Bot);
+
+  const executor = getExecutor(mockServer, 'fill-area');
+  const result = await executor({ x1: 0, y1: 64, z1: 0, x2: 2, y2: 64, z2: 2, blockType: 'cobblestone' });
+
+  t.true(!!result.isError);
+  t.true(result.content[0].text.includes('Placed 0/9'));
+  t.true(result.content[0].text.includes('INTERRUPTED'));
 });

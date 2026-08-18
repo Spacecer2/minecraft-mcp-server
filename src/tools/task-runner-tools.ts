@@ -6,6 +6,7 @@ import { Vec3 } from 'vec3';
 import { Block } from 'prismarine-block';
 import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
+import { checkInterrupt, isInterruptError, getInterruptReason } from '../interrupt.js';
 import {
   generateTemplate,
   getTemplateNames,
@@ -467,24 +468,33 @@ export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mine
 
       let placed = 0;
       let failed = 0;
-      for (const step of toExecute) {
-        try {
-          const result = await placeAt(bot, new Vec3(step.x, step.y, step.z), step.face);
-          if (result.ok) {
-            step.status = 'placed';
-            placed++;
-          } else {
+      try {
+        for (const step of toExecute) {
+          checkInterrupt();
+          try {
+            const result = await placeAt(bot, new Vec3(step.x, step.y, step.z), step.face);
+            if (result.ok) {
+              step.status = 'placed';
+              placed++;
+            } else {
+              step.status = 'failed';
+              step.reason = result.reason;
+              failed++;
+              break;
+            }
+          } catch (err) {
             step.status = 'failed';
-            step.reason = result.reason;
+            step.reason = err instanceof Error ? err.message : String(err);
             failed++;
             break;
           }
-        } catch (err) {
-          step.status = 'failed';
-          step.reason = err instanceof Error ? err.message : String(err);
-          failed++;
-          break;
         }
+      } catch (error) {
+        if (isInterruptError(error)) {
+          task.progress = buildProgress(task);
+          return factory.createErrorResponse(`INTERRUPTED: ${getInterruptReason() ?? 'Action cancelled by watchdog'}`);
+        }
+        throw error;
       }
 
       const placedTotal = task.steps.filter(s => s.status === 'placed').length;
