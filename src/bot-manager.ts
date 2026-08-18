@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { BotConnection } from './bot-connection.js';
 import { MessageStore } from './message-store.js';
 
+const SPAWN_TIMEOUT_MS = 10000;
+
 interface BotManagerConfig {
   host: string;
   port: number;
@@ -13,6 +15,7 @@ interface BotManagerConfig {
 export class BotManager {
   private bots = new Map<string, BotConnection>();
   private stores = new Map<string, MessageStore>();
+  private blackboard = new Map<string, string>();
   private host: string;
   private port: number;
   private primaryName: string;
@@ -57,6 +60,22 @@ export class BotManager {
     return this.getConnection(name).getBot();
   }
 
+  setShared(key: string, value: string): void {
+    this.blackboard.set(key, value);
+  }
+
+  getShared(key: string): string | undefined {
+    return this.blackboard.get(key);
+  }
+
+  getAllShared(): Record<string, string> {
+    return Object.fromEntries(this.blackboard);
+  }
+
+  deleteShared(key: string): void {
+    this.blackboard.delete(key);
+  }
+
   private makeCallbacks(botName: string) {
     return {
       onLog: this.onLog,
@@ -77,17 +96,29 @@ export class BotManager {
     return connection;
   }
 
-  spawnBot(name: string, host?: string, port?: number): BotConnection {
+  async spawnBot(name: string, host?: string, port?: number): Promise<BotConnection> {
     if (this.bots.has(name)) {
       throw new Error(`A bot named "${name}" already exists.`);
     }
+    const targetHost = host ?? this.host;
+    const targetPort = port ?? this.port;
     const connection = new BotConnection(
-      { host: host ?? this.host, port: port ?? this.port, username: name },
+      { host: targetHost, port: targetPort, username: name },
       this.makeCallbacks(name)
     );
     this.addBot(connection, name);
     connection.connect();
-    this.onLog('info', `Spawned bot "${name}" (${host ?? this.host}:${port ?? this.port})`);
+
+    const spawned = await connection.waitForSpawn(SPAWN_TIMEOUT_MS);
+    if (!spawned) {
+      this.onLog('warn', `Bot "${name}" failed to finish connecting to ${targetHost}:${targetPort} within ${SPAWN_TIMEOUT_MS}ms`);
+      throw new Error(
+        `Bot "${name}" did not finish connecting to ${targetHost}:${targetPort} within ${SPAWN_TIMEOUT_MS}ms. ` +
+        `The bot may be in an unusable state; check that the Minecraft server is running and reachable.`
+      );
+    }
+
+    this.onLog('info', `Spawned bot "${name}" (${targetHost}:${targetPort})`);
     return connection;
   }
 

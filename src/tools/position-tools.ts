@@ -63,6 +63,12 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
           await gotoPromise;
         }
         const pos = bot.entity.position;
+        if (bot.entity.onGround === false) {
+          throw new Error(`Arrived at (${pos.x}, ${pos.y}, ${pos.z}) but bot is airborne/falling (onGround=false). Verify position.`);
+        }
+        if (pos.y < -64) {
+          throw new Error(`Bot is below the world floor at y=${pos.y} (void).`);
+        }
         return factory.createResponse(`Successfully moved to position near (${x}, ${y}, ${z}); now at (${pos.x}, ${pos.y}, ${pos.z})`);
       } catch (error) {
         if (timedOut) {

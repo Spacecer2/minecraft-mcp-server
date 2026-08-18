@@ -213,3 +213,81 @@ test('find-entity searches any entity when type not specified', async (t) => {
 
   t.true(result.content[0].text.includes('cow'));
 });
+
+function setupWithBot(mockBot: unknown) {
+  const mockServer = {
+    tool: sinon.stub()
+  } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+  const getBot = () => mockBot as mineflayer.Bot;
+  registerEntityTools(factory, getBot);
+  return mockServer;
+}
+
+function getToolExecutor(mockServer: McpServer, toolName: string) {
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const call = toolCalls.find(c => c.args[0] === toolName);
+  return call!.args[3];
+}
+
+test('registerEntityTools registers find-hostiles tool', (t) => {
+  const mockServer = setupWithBot({});
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const call = toolCalls.find(c => c.args[0] === 'find-hostiles');
+  t.truthy(call);
+  t.is(call!.args[1], 'Find nearby hostile mobs (zombies, creepers, etc.) within a maximum distance');
+});
+
+test('find-hostiles returns a hostile entity within range', async (t) => {
+  const mockBot = {
+    entity: { id: 1, position: new Vec3(0, 64, 0) },
+    entities: new Map<number, unknown>([
+      [1, { id: 1, name: 'Player', type: 'player', position: new Vec3(0, 64, 0) }],
+      [10, { id: 10, name: 'zombie', type: 'mob', position: new Vec3(5, 64, 8), health: 10 }],
+      [11, { id: 11, name: 'cow', type: 'mob', position: new Vec3(3, 64, 0), health: 10 }]
+    ])
+  };
+  const mockServer = setupWithBot(mockBot);
+  const executor = getToolExecutor(mockServer, 'find-hostiles');
+
+  const result = await executor({ maxDistance: 24 });
+
+  const text = result.content[0].text;
+  t.true(text.includes('- zombie at (5, 64, 8), distance 9.4, health 10'));
+  t.false(text.includes('cow'));
+});
+
+test('find-hostiles respects maxDistance', async (t) => {
+  const mockBot = {
+    entity: { id: 1, position: new Vec3(0, 64, 0) },
+    entities: new Map<number, unknown>([
+      [10, { id: 10, name: 'zombie', type: 'mob', position: new Vec3(30, 64, 0), health: 10 }]
+    ])
+  };
+  const mockServer = setupWithBot(mockBot);
+  const executor = getToolExecutor(mockServer, 'find-hostiles');
+
+  const result = await executor({ maxDistance: 16 });
+
+  t.is(result.content[0].text, 'No hostiles within 16 blocks');
+});
+
+test('find-hostiles returns no hostiles when entities is empty', async (t) => {
+  const mockBot = {
+    entity: { id: 1, position: new Vec3(0, 64, 0) },
+    entities: new Map<number, unknown>()
+  };
+  const mockServer = setupWithBot(mockBot);
+  const executor = getToolExecutor(mockServer, 'find-hostiles');
+
+  const result = await executor({ maxDistance: 24 });
+
+  t.is(result.content[0].text, 'No hostiles within 24 blocks');
+});

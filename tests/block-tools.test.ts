@@ -520,3 +520,106 @@ test('place-block errors when the block is not present after placing', async (t)
   t.true(!!result.isError);
   t.true(result.content[0].text.includes('Placement failed — block not present'));
 });
+
+test('dig-block times out the auto-approach when the bot is stuck', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const mockBlock = { name: 'stone', position: new Vec3(5, 64, 5) };
+  const pathfinderStopStub = sinon.stub();
+  const mockBot = {
+    entity: { position: new Vec3(0, 64, 0) },
+    blockAt: sinon.stub().returns(mockBlock),
+    dig: sinon.stub(),
+    canDigBlock: () => false,
+    canSeeBlock: () => false,
+    pathfinder: {
+      goto: sinon.stub().returns(new Promise(() => {})),
+      stop: pathfinderStopStub
+    }
+  } as unknown as Partial<mineflayer.Bot>;
+  const getBot = () => mockBot as mineflayer.Bot;
+
+  registerBlockTools(factory, getBot);
+
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const digBlockCall = toolCalls.find(call => call.args[0] === 'dig-block');
+  const executor = digBlockCall!.args[3];
+
+  const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    const pending = executor({ x: 5, y: 64, z: 5 });
+    await clock.tickAsync(8001);
+    const result = await pending;
+
+    t.true(!!result.isError);
+    t.true(result.content[0].text.includes('Timed out approaching (5, 64, 5)'));
+    t.true(result.content[0].text.includes('now at (0, 64, 0)'));
+    t.true(pathfinderStopStub.called);
+    t.false((mockBot.dig as sinon.SinonStub).called);
+  } finally {
+    clock.restore();
+  }
+});
+
+test('place-block times out the auto-approach when the bot is stuck', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const target = new Vec3(5, 64, 5);
+  const reference = new Vec3(5, 63, 5);
+  const pathfinderStopStub = sinon.stub();
+  const blockAtStub = sinon.stub().callsFake((pos: Vec3) => {
+    if (pos.equals(target)) return { name: 'air', position: target };
+    if (pos.equals(reference)) return { name: 'stone', position: reference };
+    return { name: 'air', position: pos };
+  });
+  const placeBlockStub = sinon.stub();
+  const mockBot = {
+    entity: { position: new Vec3(0, 64, 0) },
+    blockAt: blockAtStub,
+    placeBlock: placeBlockStub,
+    canSeeBlock: () => false,
+    lookAt: sinon.stub(),
+    pathfinder: {
+      goto: sinon.stub().returns(new Promise(() => {})),
+      stop: pathfinderStopStub
+    }
+  } as unknown as Partial<mineflayer.Bot>;
+  const getBot = () => mockBot as mineflayer.Bot;
+
+  registerBlockTools(factory, getBot);
+
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const placeBlockCall = toolCalls.find(call => call.args[0] === 'place-block');
+  const executor = placeBlockCall!.args[3];
+
+  const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    const pending = executor({ x: 5, y: 64, z: 5 });
+    await clock.tickAsync(8001);
+    const result = await pending;
+
+    t.true(!!result.isError);
+    t.true(result.content[0].text.includes('Timed out approaching (5, 63, 5)'));
+    t.true(result.content[0].text.includes('now at (0, 64, 0)'));
+    t.true(pathfinderStopStub.called);
+    t.false(placeBlockStub.called);
+  } finally {
+    clock.restore();
+  }
+});

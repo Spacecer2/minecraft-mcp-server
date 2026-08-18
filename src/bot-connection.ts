@@ -49,6 +49,20 @@ export class BotConnection {
     return this.state === 'connected';
   }
 
+  async waitForSpawn(timeoutMs = 10000): Promise<boolean> {
+    const pollInterval = 100;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < timeoutMs) {
+      const state = this.state;
+      if (state === 'connected') return true;
+      if (state === 'disconnected') return false;
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+    }
+
+    return this.state === 'connected';
+  }
+
   connect(): void {
     const botOptions = {
       host: this.config.host,

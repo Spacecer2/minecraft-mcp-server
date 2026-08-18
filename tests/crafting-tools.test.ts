@@ -281,10 +281,13 @@ test('craft-item crafts successfully when ingredients are available', async (t) 
   };
   const factory = new ToolFactory(mockServer, mockManager);
 
-  const craftStub = sinon.stub().resolves();
+  let inventory = inventoryItems.slice();
+  const craftStub = sinon.stub().callsFake(async () => {
+    inventory = [...inventory, { name: 'stick', count: 1, slot: inventory.length }];
+  });
   const mockBot = {
     version: '1.21.8',
-    inventory: { items: () => inventoryItems },
+    inventory: { items: () => inventory },
     craft: craftStub
   } as unknown as mineflayer.Bot;
 
@@ -331,14 +334,17 @@ test('craft-item reports the real crafted item name, not the raw query', async (
   };
   const factory = new ToolFactory(mockServer, mockManager);
 
-  const craftStub = sinon.stub().resolves();
+  let inventory = inventoryItems.slice();
+  const craftStub = sinon.stub().callsFake(async () => {
+    inventory = [...inventory, { name: 'stone_axe', count: 1, slot: inventory.length }];
+  });
   const recipesForStub = sinon.stub().callsFake((id: number) => {
     return id === stoneAxeId ? [stoneAxeRecipe] : [];
   });
 
   const mockBot = {
     version: '1.21.8',
-    inventory: { items: () => inventoryItems },
+    inventory: { items: () => inventory },
     craft: craftStub,
     recipesFor: recipesForStub
   } as unknown as mineflayer.Bot;
@@ -355,4 +361,48 @@ test('craft-item reports the real crafted item name, not the raw query', async (
   const text = result.content[0].text;
   t.true(text.includes('stone_axe'));
   t.false(text.toLowerCase().includes('successfully crafted axe '));
+});
+
+test('craft-item does not count crafts where the item never appears in inventory', async (t) => {
+  const mcData = minecraftData('1.21.8');
+  const recipes = flattenRecipes((mcData as unknown as { recipes: unknown }).recipes);
+  const stickId = (mcData as unknown as { itemsByName: Record<string, { id: number }> }).itemsByName.stick.id;
+
+  const stickRecipe = recipes.find((recipe) => {
+    const r = recipe as Record<string, unknown>;
+    const result = r.result as Record<string, unknown> | undefined;
+    return !!result && typeof result.id === 'number' && result.id === stickId;
+  });
+
+  t.truthy(stickRecipe);
+
+  const ingredientCounts = countRecipeIngredients(mcData, stickRecipe);
+  const inventoryItems = Object.entries(ingredientCounts).map(([name, count], idx) => ({ name, count, slot: idx }));
+
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const craftStub = sinon.stub().resolves();
+  const mockBot = {
+    version: '1.21.8',
+    inventory: { items: () => inventoryItems },
+    craft: craftStub
+  } as unknown as mineflayer.Bot;
+
+  registerCraftingTools(factory, () => mockBot);
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const craftItemCall = toolCalls.find(call => call.args[0] === 'craft-item');
+  const executor = craftItemCall!.args[3];
+
+  const result = await executor({ outputItem: 'stick', amount: 1 });
+
+  t.true(craftStub.called);
+  t.true(!!result.isError);
+  t.true(result.content[0].text.includes('did not appear in inventory'));
+  t.false(result.content[0].text.toLowerCase().includes('successfully crafted'));
 });

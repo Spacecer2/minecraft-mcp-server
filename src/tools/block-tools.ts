@@ -10,10 +10,51 @@ import { coerceCoordinates } from './coordinate-utils.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 const MAX_FIND_BLOCKS_COUNT = 256;
+const APPROACH_TIMEOUT_MS = 8000;
 
 interface FaceOption {
   direction: string;
   vector: Vec3;
+}
+
+async function gotoWithApproachTimeout(
+  bot: mineflayer.Bot,
+  goal: InstanceType<typeof goals.GoalNear>,
+  x: number,
+  y: number,
+  z: number,
+  timeoutMs: number = APPROACH_TIMEOUT_MS
+): Promise<void> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`Timed out approaching (${x}, ${y}, ${z})`));
+    }, timeoutMs);
+  });
+
+  const gotoPromise = bot.pathfinder.goto(goal);
+
+  try {
+    await Promise.race([gotoPromise, timeoutPromise]);
+  } catch (err) {
+    if (!timedOut) throw err;
+    const pos = bot.entity.position;
+    const px = Math.floor(pos.x);
+    const py = Math.floor(pos.y);
+    const pz = Math.floor(pos.z);
+    throw new Error(`Timed out approaching (${x}, ${y}, ${z}); position unchanged: now at (${px}, ${py}, ${pz})`);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (timedOut) {
+      bot.pathfinder.stop();
+      gotoPromise.catch(() => {});
+    }
+  }
 }
 
 export function registerBlockTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
@@ -67,7 +108,14 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         if (referenceBlock && referenceBlock.name !== 'air') {
           if (!bot.canSeeBlock(referenceBlock)) {
             const goal = new goals.GoalNear(referencePos.x, referencePos.y, referencePos.z, 2);
-            await bot.pathfinder.goto(goal);
+            try {
+              await gotoWithApproachTimeout(bot, goal, referencePos.x, referencePos.y, referencePos.z);
+            } catch (err) {
+              if (err instanceof Error && err.message.startsWith('Timed out approaching')) {
+                return factory.createErrorResponse(err.message);
+              }
+              throw err;
+            }
           }
 
           await bot.lookAt(placePos, true);
@@ -111,7 +159,14 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
 
       if (!bot.canDigBlock(block) || !bot.canSeeBlock(block)) {
         const goal = new goals.GoalNear(x, y, z, 2);
-        await bot.pathfinder.goto(goal);
+        try {
+          await gotoWithApproachTimeout(bot, goal, x, y, z);
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('Timed out approaching')) {
+            return factory.createErrorResponse(err.message);
+          }
+          throw err;
+        }
       }
 
       await bot.dig(block);

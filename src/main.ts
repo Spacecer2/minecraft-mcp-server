@@ -18,6 +18,10 @@ import { registerCraftingTools } from './tools/crafting-tools.js';
 import { registerFurnaceTools } from './tools/furnace-tools.js';
 import { registerWorldStateTools } from './tools/world-state-tools.js';
 import { registerScanTools } from './tools/scan-tools.js';
+import { registerMemoryTools } from './tools/memory-tools.js';
+import { registerBuildTools } from './tools/build-tools.js';
+import { registerNavigationTools } from './tools/navigation-tools.js';
+import { registerCoordinationTools } from './tools/coordination-tools.js';
 import { z } from "zod";
 import * as fs from 'node:fs';
 
@@ -72,7 +76,13 @@ async function main() {
     },
     async ({ name, host, port }) => {
       const botName = name || generateBotName();
-      manager.spawnBot(botName, host ?? config.host, port ?? config.port);
+      try {
+        await manager.spawnBot(botName, host ?? config.host, port ?? config.port);
+      } catch (err) {
+        return factory.createErrorResponse(
+          `Failed to spawn bot "${botName}": ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
       return factory.createResponse(`Spawned bot "${botName}". Use bot="${botName}" on any tool to control it.`);
     }
   );
@@ -132,6 +142,10 @@ async function main() {
   registerFurnaceTools(factory, getBot);
   registerWorldStateTools(factory, getBot);
   registerScanTools(factory, getBot);
+  registerMemoryTools(factory);
+  registerBuildTools(factory, getBot);
+  registerNavigationTools(factory, getBot);
+  registerCoordinationTools(factory, manager);
 
   process.stdin.on('end', () => {
     manager.cleanup();

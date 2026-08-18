@@ -365,3 +365,78 @@ test.serial('move-in-direction reports new position when bot moves', async (t) =
   t.true(result.content[0].text.includes('Moved forward for 1000ms'));
   t.true(result.content[0].text.includes('to position (11, 20, 30)'));
 });
+
+test('move-to-position warns when bot arrives airborne (onGround=false)', async (t) => {
+  const mockServer = {
+    tool: sinon.stub()
+  } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const mockBot = {
+    pathfinder: {
+      goto: sinon.stub().resolves(),
+      stop: sinon.stub()
+    },
+    entity: {
+      position: new Vec3(98, 63, 202),
+      onGround: false
+    }
+  } as Partial<mineflayer.Bot>;
+  const getBot = () => mockBot as mineflayer.Bot;
+
+  registerPositionTools(factory, getBot);
+
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const moveToPositionCall = toolCalls.find(call => call.args[0] === 'move-to-position');
+  const executor = moveToPositionCall!.args[3];
+
+  const result = await executor({ x: 100, y: 64, z: 200 });
+
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('airborne/falling'));
+  t.true(result.content[0].text.includes('onGround=false'));
+});
+
+test('move-to-position returns void error when bot is below the world floor', async (t) => {
+  const mockServer = {
+    tool: sinon.stub()
+  } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const mockBot = {
+    pathfinder: {
+      goto: sinon.stub().resolves(),
+      stop: sinon.stub()
+    },
+    entity: {
+      position: new Vec3(100, -70, 200)
+    }
+  } as Partial<mineflayer.Bot>;
+  const getBot = () => mockBot as mineflayer.Bot;
+
+  registerPositionTools(factory, getBot);
+
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const moveToPositionCall = toolCalls.find(call => call.args[0] === 'move-to-position');
+  const executor = moveToPositionCall!.args[3];
+
+  const result = await executor({ x: 100, y: 64, z: 200 });
+
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('below the world floor'));
+  t.true(result.content[0].text.includes('y=-70'));
+});

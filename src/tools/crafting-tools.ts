@@ -450,10 +450,20 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
             } else {
               await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1);
             }
-            craftedCount++;
-            craftedNames.push(candidate.resultName);
-            craftedThisAttempt = true;
-            log('info', `Crafted ${candidate.resultName}`);
+
+            const beforeCount = currentInventory.find(i => i.name === candidate.resultName)?.count ?? 0;
+            const afterInventory = bot.inventory.items().map(item => ({ name: item.name, count: item.count }));
+            const afterCount = afterInventory.find(i => i.name === candidate.resultName)?.count ?? 0;
+
+            if (afterCount > beforeCount) {
+              craftedCount++;
+              craftedNames.push(candidate.resultName);
+              craftedThisAttempt = true;
+              log('info', `Crafted ${candidate.resultName}`);
+            } else {
+              lastError = `Craft reported success for ${candidate.resultName} but the crafted item did not appear in inventory`;
+              log('warn', lastError);
+            }
             break;
           } catch (err) {
             lastError = err instanceof Error ? err.message : String(err);
