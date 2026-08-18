@@ -13,7 +13,11 @@ test('registerGameStateTools registers detect-gamemode tool', (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   const mockBot = {} as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
@@ -33,7 +37,11 @@ test('detect-gamemode returns creative mode', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   
   const mockBot = {
     game: {
@@ -60,7 +68,11 @@ test('detect-gamemode returns survival mode', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   
   const mockBot = {
     game: {
@@ -87,7 +99,11 @@ test('detect-gamemode returns adventure mode', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   
   const mockBot = {
     game: {

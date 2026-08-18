@@ -9,3 +9,9 @@ export function coerceCoordinates(x: number, y: number, z: number): { x: number;
 
   return { x: coercedX, y: coercedY, z: coercedZ };
 }
+
+export function validateWorldY(y: number, worldMinY = -64, worldMaxY = 320): void {
+  if (y < worldMinY || y > worldMaxY) {
+    throw new Error(`y coordinate ${y} is outside the valid world height range ${worldMinY}..${worldMaxY}`);
+  }
+}

@@ -74,7 +74,11 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
 
           try {
             await bot.placeBlock(referenceBlock, face.vector.scaled(-1));
-            return factory.createResponse(`Placed block at (${x}, ${y}, ${z}) using ${face.direction} face`);
+            const placedBlock = bot.blockAt(placePos);
+            if (!placedBlock || placedBlock.name === 'air') {
+              return factory.createErrorResponse(`Placement failed — block not present at (${x}, ${y}, ${z})`);
+            }
+            return factory.createResponse(`Placed block at (${x}, ${y}, ${z}); now: ${placedBlock.name}`);
           } catch (placeError) {
             log('warn', `Failed to place using ${face.direction} face: ${placeError}`);
             continue;
@@ -111,7 +115,11 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       }
 
       await bot.dig(block);
-      return factory.createResponse(`Dug ${block.name} at (${x}, ${y}, ${z})`);
+      const dugBlock = bot.blockAt(blockPos);
+      if (dugBlock && dugBlock.name === block.name) {
+        return factory.createErrorResponse(`Dig failed — block still present at (${x}, ${y}, ${z})`);
+      }
+      return factory.createResponse(`Dug ${block.name} at (${x}, ${y}, ${z}); now: ${dugBlock?.name ?? 'air'}`);
     }
   );
 

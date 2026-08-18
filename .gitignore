@@ -24,3 +24,7 @@ pids/
 # Claude Code configuration
 .claude
 .idea
+
+# graphify knowledge-graph artifacts
+graphify-out/
+src/graphify-out/

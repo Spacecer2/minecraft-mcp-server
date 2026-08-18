@@ -14,7 +14,11 @@ test('registerBlockTools registers place-block tool', (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   const mockBot = {} as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
@@ -34,7 +38,11 @@ test('registerBlockTools registers dig-block tool', (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   const mockBot = {} as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
@@ -54,7 +62,11 @@ test('registerBlockTools registers get-block-info tool', (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   const mockBot = {} as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
@@ -74,7 +86,11 @@ test('registerBlockTools registers find-blocks tool', (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   const mockBot = {} as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
@@ -94,7 +110,11 @@ test('get-block-info returns block information', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   
   const mockBlock = {
     name: 'stone',
@@ -127,7 +147,11 @@ test('get-block-info handles missing block', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   
   const mockBot = {
     blockAt: sinon.stub().returns(null)
@@ -152,7 +176,11 @@ test('dig-block handles air blocks', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   
   const mockBlock = {
     name: 'air'
@@ -180,7 +208,11 @@ test('place-block blocks placing at bot position and one block above', async (t)
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const mockBot = {
     entity: { position: new Vec3(10.4, 64, 20.7) },
@@ -208,7 +240,11 @@ test('place-block floors input coordinates before self-placement guard', async (
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const mockBot = {
     entity: { position: new Vec3(10.4, 64, 20.7) },
@@ -234,7 +270,11 @@ test('find-blocks returns not found when block not found', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   
   const mockBot = {
     version: '1.21',
@@ -260,7 +300,11 @@ test('find-blocks returns multiple results when count is greater than one', asyn
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const mockBot = {
     version: '1.21',
@@ -289,7 +333,11 @@ test('find-blocks clamps oversized count before calling bot.findBlocks', async (
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const findBlocksStub = sinon.stub().returns([new Vec3(1, 64, 0)]);
   const mockBot = {
@@ -309,4 +357,166 @@ test('find-blocks clamps oversized count before calling bot.findBlocks', async (
 
   const findBlocksArgs = findBlocksStub.firstCall.args[0];
   t.is(findBlocksArgs.count, 256);
+});
+
+test('dig-block verifies the block is gone after digging', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const target = new Vec3(5, 64, 5);
+  let currentBlock: { name: string; position: Vec3 } = { name: 'stone', position: target };
+  const blockAtStub = sinon.stub().callsFake((pos: Vec3) => {
+    if (pos.equals(target)) return currentBlock;
+    return null;
+  });
+  const digStub = sinon.stub().callsFake(async () => {
+    currentBlock = { name: 'air', position: target };
+  });
+
+  const mockBot = {
+    blockAt: blockAtStub,
+    dig: digStub,
+    canDigBlock: () => true,
+    canSeeBlock: () => true,
+    pathfinder: { goto: sinon.stub().resolves() }
+  } as unknown as Partial<mineflayer.Bot>;
+  const getBot = () => mockBot as mineflayer.Bot;
+
+  registerBlockTools(factory, getBot);
+
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const digBlockCall = toolCalls.find(call => call.args[0] === 'dig-block');
+  const executor = digBlockCall!.args[3];
+
+  const result = await executor({ x: 5, y: 64, z: 5 });
+
+  t.true(digStub.calledOnce);
+  t.false(!!result.isError);
+  t.true(result.content[0].text.includes('Dug stone at (5, 64, 5); now: air'));
+});
+
+test('dig-block errors when the block is still present after digging', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const mockBot = {
+    blockAt: sinon.stub().returns({ name: 'stone', position: new Vec3(5, 64, 5) }),
+    dig: sinon.stub().resolves(),
+    canDigBlock: () => true,
+    canSeeBlock: () => true,
+    pathfinder: { goto: sinon.stub().resolves() }
+  } as unknown as Partial<mineflayer.Bot>;
+  const getBot = () => mockBot as mineflayer.Bot;
+
+  registerBlockTools(factory, getBot);
+
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const digBlockCall = toolCalls.find(call => call.args[0] === 'dig-block');
+  const executor = digBlockCall!.args[3];
+
+  const result = await executor({ x: 5, y: 64, z: 5 });
+
+  t.true(!!result.isError);
+  t.true(result.content[0].text.includes('Dig failed — block still present'));
+});
+
+test('place-block verifies the block is present after placing', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const target = new Vec3(5, 64, 5);
+  const reference = new Vec3(5, 63, 5);
+  let placed = false;
+  const blockAtStub = sinon.stub().callsFake((pos: Vec3) => {
+    if (pos.equals(target)) {
+      return placed ? { name: 'cobblestone', position: target } : { name: 'air', position: target };
+    }
+    if (pos.equals(reference)) return { name: 'stone', position: reference };
+    return { name: 'air', position: pos };
+  });
+  const placeBlockStub = sinon.stub().callsFake(async () => { placed = true; });
+
+  const mockBot = {
+    entity: { position: new Vec3(0, 64, 0) },
+    blockAt: blockAtStub,
+    placeBlock: placeBlockStub,
+    canSeeBlock: () => true,
+    lookAt: sinon.stub().resolves(),
+    pathfinder: { goto: sinon.stub().resolves() }
+  } as unknown as Partial<mineflayer.Bot>;
+  const getBot = () => mockBot as mineflayer.Bot;
+
+  registerBlockTools(factory, getBot);
+
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const placeBlockCall = toolCalls.find(call => call.args[0] === 'place-block');
+  const executor = placeBlockCall!.args[3];
+
+  const result = await executor({ x: 5, y: 64, z: 5 });
+
+  t.true(placeBlockStub.calledOnce);
+  t.false(!!result.isError);
+  t.true(result.content[0].text.includes('Placed block at (5, 64, 5); now: cobblestone'));
+});
+
+test('place-block errors when the block is not present after placing', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const target = new Vec3(5, 64, 5);
+  const reference = new Vec3(5, 63, 5);
+  const blockAtStub = sinon.stub().callsFake((pos: Vec3) => {
+    if (pos.equals(target)) return { name: 'air', position: target };
+    if (pos.equals(reference)) return { name: 'stone', position: reference };
+    return { name: 'air', position: pos };
+  });
+
+  const mockBot = {
+    entity: { position: new Vec3(0, 64, 0) },
+    blockAt: blockAtStub,
+    placeBlock: sinon.stub().resolves(),
+    canSeeBlock: () => true,
+    lookAt: sinon.stub().resolves(),
+    pathfinder: { goto: sinon.stub().resolves() }
+  } as unknown as Partial<mineflayer.Bot>;
+  const getBot = () => mockBot as mineflayer.Bot;
+
+  registerBlockTools(factory, getBot);
+
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const placeBlockCall = toolCalls.find(call => call.args[0] === 'place-block');
+  const executor = placeBlockCall!.args[3];
+
+  const result = await executor({ x: 5, y: 64, z: 5 });
+
+  t.true(!!result.isError);
+  t.true(result.content[0].text.includes('Placement failed — block not present'));
 });

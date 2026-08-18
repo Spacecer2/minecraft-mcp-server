@@ -71,6 +71,18 @@ export class BotConnection {
 
       const mcData = minecraftData(bot.version);
       const defaultMove = new Movements(bot, mcData);
+      const movementConfig = defaultMove as unknown as {
+        canDig: boolean;
+        allow1by1towers: boolean;
+        allowParkourAscend: boolean;
+        allowParkourDescend: boolean;
+        allowFreefall: boolean;
+      };
+      movementConfig.canDig = true;
+      movementConfig.allow1by1towers = true;
+      movementConfig.allowParkourAscend = true;
+      movementConfig.allowParkourDescend = true;
+      movementConfig.allowFreefall = false;
       bot.pathfinder.setMovements(defaultMove);
 
       bot.chat('LLM-powered bot ready to receive instructions!');

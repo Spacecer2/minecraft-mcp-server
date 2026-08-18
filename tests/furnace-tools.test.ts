@@ -21,7 +21,11 @@ test('registerFurnaceTools registers smelt-item tool', (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   const mockBot = {} as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
@@ -38,7 +42,11 @@ test('smelt-item returns error when no furnace block found', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const mockBot = {
     blockAt: sinon.stub().returns(null)
@@ -67,7 +75,11 @@ test('smelt-item loads input and fuel and takes output', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const furnace = new EventEmitter() as mineflayer.Furnace & EventEmitter;
   const outputItem = createMockItem({
@@ -124,7 +136,11 @@ test('smelt-item returns validation error for non-positive counts', async (t) =>
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   const mockBot = {} as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
@@ -134,7 +150,7 @@ test('smelt-item returns validation error for non-positive counts', async (t) =>
   const smeltCall = toolCalls.find(call => call.args[0] === 'smelt-item');
   const executor = smeltCall!.args[3];
 
-  const inputCountResult = await executor({
+  const inputCountError = await t.throwsAsync(() => executor({
     x: 1,
     y: 2,
     z: 3,
@@ -142,13 +158,12 @@ test('smelt-item returns validation error for non-positive counts', async (t) =>
     inputCount: 0,
     fuelItem: 'coal',
     fuelCount: 1
-  });
+  }));
 
-  t.true(inputCountResult.isError);
-  t.true(inputCountResult.content[0].text.includes('Invalid tool arguments'));
-  t.true(inputCountResult.content[0].text.includes('inputCount'));
+  t.true((inputCountError as Error).message.includes('Invalid tool arguments'));
+  t.true((inputCountError as Error).message.includes('inputCount'));
 
-  const fuelCountResult = await executor({
+  const fuelCountError = await t.throwsAsync(() => executor({
     x: 1,
     y: 2,
     z: 3,
@@ -156,9 +171,8 @@ test('smelt-item returns validation error for non-positive counts', async (t) =>
     inputCount: 1,
     fuelItem: 'coal',
     fuelCount: -1
-  });
+  }));
 
-  t.true(fuelCountResult.isError);
-  t.true(fuelCountResult.content[0].text.includes('Invalid tool arguments'));
-  t.true(fuelCountResult.content[0].text.includes('fuelCount'));
+  t.true((fuelCountError as Error).message.includes('Invalid tool arguments'));
+  t.true((fuelCountError as Error).message.includes('fuelCount'));
 });

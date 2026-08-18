@@ -416,6 +416,7 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
       }
 
       let craftedCount = 0;
+      const craftedNames: string[] = [];
       let lastError = "";
 
       const table = findNearbyCraftingTable(bot, mcData);
@@ -450,6 +451,7 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
               await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1);
             }
             craftedCount++;
+            craftedNames.push(candidate.resultName);
             craftedThisAttempt = true;
             log('info', `Crafted ${candidate.resultName}`);
             break;
@@ -475,7 +477,12 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
         return factory.createErrorResponse(`Failed to craft ${outputItem}: ${lastError || "Missing ingredients or recipe not found"}`);
       }
 
-      return factory.createResponse(`Successfully crafted ${outputItem} ${craftedCount} time(s)`);
+      const distinctNames = Array.from(new Set(craftedNames));
+      if (distinctNames.length === 1) {
+        return factory.createResponse(`Successfully crafted ${distinctNames[0]} ${craftedCount} time(s)`);
+      }
+
+      return factory.createResponse(`Successfully crafted ${distinctNames.join(', ')} (${craftedCount} time(s))`);
     }
   );
 

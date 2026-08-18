@@ -85,7 +85,11 @@ test('registerCraftingTools registers all 4 tools', (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   const mockBot = {} as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
@@ -107,7 +111,11 @@ test('can-craft with empty inventory returns missing items', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const mockBot = {
     version: '1.21.11',
@@ -138,7 +146,11 @@ test('get-recipe returns recipe structure for valid item', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const mockBot = {
     version: '1.21.8',
@@ -181,7 +193,11 @@ test('list-recipes returns proper structure', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const mockBot = {
     version: '1.21.8',
@@ -214,7 +230,11 @@ test('craft-item returns error when recipe not available', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const mockBot = {
     version: '1.21.8',
@@ -255,7 +275,11 @@ test('craft-item crafts successfully when ingredients are available', async (t) 
 
   const mockServer = { tool: sinon.stub() } as unknown as McpServer;
   const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const craftStub = sinon.stub().resolves();
   const mockBot = {
@@ -282,4 +306,53 @@ test('uses real minecraft-data recipes for version 1.21.8', async (t) => {
   t.truthy(mcData.recipes);
   const isValid = mcData.recipes && (Array.isArray(mcData.recipes) || typeof mcData.recipes === 'object');
   t.true(isValid);
+});
+
+test('craft-item reports the real crafted item name, not the raw query', async (t) => {
+  const mcData = minecraftData('1.21.8');
+  const stoneAxeId = (mcData as unknown as { itemsByName: Record<string, { id: number }> }).itemsByName.stone_axe.id;
+
+  const recipes = flattenRecipes((mcData as unknown as { recipes: unknown }).recipes);
+  const stoneAxeRecipe = recipes.find((recipe) => {
+    const r = recipe as Record<string, unknown>;
+    const result = r.result as Record<string, unknown> | undefined;
+    return !!result && typeof result.id === 'number' && result.id === stoneAxeId;
+  });
+  t.truthy(stoneAxeRecipe);
+
+  const ingredientCounts = countRecipeIngredients(mcData, stoneAxeRecipe);
+  const inventoryItems = Object.entries(ingredientCounts).map(([name, count], idx) => ({ name, count, slot: idx }));
+
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  const craftStub = sinon.stub().resolves();
+  const recipesForStub = sinon.stub().callsFake((id: number) => {
+    return id === stoneAxeId ? [stoneAxeRecipe] : [];
+  });
+
+  const mockBot = {
+    version: '1.21.8',
+    inventory: { items: () => inventoryItems },
+    craft: craftStub,
+    recipesFor: recipesForStub
+  } as unknown as mineflayer.Bot;
+
+  registerCraftingTools(factory, () => mockBot);
+  const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+  const craftItemCall = toolCalls.find(call => call.args[0] === 'craft-item');
+  const executor = craftItemCall!.args[3];
+
+  const result = await executor({ outputItem: 'axe', amount: 1 });
+
+  t.true(craftStub.called);
+  t.false(!!result.isError);
+  const text = result.content[0].text;
+  t.true(text.includes('stone_axe'));
+  t.false(text.toLowerCase().includes('successfully crafted axe '));
 });

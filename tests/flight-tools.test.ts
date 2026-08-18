@@ -14,7 +14,11 @@ test('registerFlightTools registers fly-to tool', (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
   const mockBot = {} as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
@@ -34,7 +38,11 @@ test('fly-to successfully flies to destination', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const flyToStub = sinon.stub().resolves();
   const stopFlyingStub = sinon.stub();
@@ -42,6 +50,9 @@ test('fly-to successfully flies to destination', async (t) => {
     creative: {
       flyTo: flyToStub,
       stopFlying: stopFlyingStub
+    },
+    game: {
+      gameMode: 'creative'
     },
     entity: {
       position: new Vec3(0, 64, 0)
@@ -70,10 +81,17 @@ test('fly-to returns error when creative mode not available', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const mockBot = {
-    creative: null
+    creative: {},
+    game: {
+      gameMode: 'survival'
+    }
   } as unknown as mineflayer.Bot;
   const getBot = () => mockBot;
 
@@ -85,7 +103,8 @@ test('fly-to returns error when creative mode not available', async (t) => {
 
   const result = await executor({ x: 100, y: 80, z: 200 });
 
-  t.true(result.content[0].text.includes('Creative mode is not available'));
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('requires creative mode'));
 });
 
 test('fly-to handles flight errors', async (t) => {
@@ -95,7 +114,11 @@ test('fly-to handles flight errors', async (t) => {
   const mockConnection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
-  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
 
   const flyToStub = sinon.stub().rejects(new Error('Cannot reach destination'));
   const stopFlyingStub = sinon.stub();
@@ -103,6 +126,9 @@ test('fly-to handles flight errors', async (t) => {
     creative: {
       flyTo: flyToStub,
       stopFlying: stopFlyingStub
+    },
+    game: {
+      gameMode: 'creative'
     },
     entity: {
       position: new Vec3(0, 64, 0)

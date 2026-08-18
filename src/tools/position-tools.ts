@@ -4,7 +4,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
-import { coerceCoordinates } from './coordinate-utils.js';
+import { coerceCoordinates, validateWorldY } from './coordinate-utils.js';
 
 type Direction = 'forward' | 'back' | 'left' | 'right';
 
@@ -37,6 +37,7 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
     },
     async ({ x, y, z, range = 1, timeoutMs }: { x: number; y: number; z: number; range?: number; timeoutMs?: number }) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
+      validateWorldY(y);
 
       const bot = getBot();
       const goal = new goals.GoalNear(x, y, z, range);
@@ -61,10 +62,12 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
         } else {
           await gotoPromise;
         }
-        return factory.createResponse(`Successfully moved to position near (${x}, ${y}, ${z})`);
+        const pos = bot.entity.position;
+        return factory.createResponse(`Successfully moved to position near (${x}, ${y}, ${z}); now at (${pos.x}, ${pos.y}, ${pos.z})`);
       } catch (error) {
         if (timedOut) {
-          throw new Error(`Move timed out after ${timeoutMs}ms`);
+          const pos = bot.entity.position;
+          throw new Error(`Move timed out after ${timeoutMs}ms. Current position: (${pos.x}, ${pos.y}, ${pos.z}), target: (${x}, ${y}, ${z})`);
         }
         throw error;
       } finally {
@@ -117,11 +120,22 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
     },
     async ({ direction, duration = 1000 }: { direction: Direction, duration?: number }) => {
       const bot = getBot();
+      const startPosition = bot.entity.position.clone();
       return new Promise((resolve) => {
         bot.setControlState(direction, true);
         setTimeout(() => {
           bot.setControlState(direction, false);
-          resolve(factory.createResponse(`Moved ${direction} for ${duration}ms`));
+          const endPosition = bot.entity.position;
+          const displacement = {
+            x: Math.abs(endPosition.x - startPosition.x),
+            y: Math.abs(endPosition.y - startPosition.y),
+            z: Math.abs(endPosition.z - startPosition.z)
+          };
+          if (displacement.x < 0.05 && displacement.y < 0.05 && displacement.z < 0.05) {
+            resolve(factory.createErrorResponse('Blocked — bot did not move'));
+          } else {
+            resolve(factory.createResponse(`Moved ${direction} for ${duration}ms to position (${endPosition.x}, ${endPosition.y}, ${endPosition.z})`));
+          }
         }, duration);
       });
     }

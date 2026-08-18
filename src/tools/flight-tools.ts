@@ -46,8 +46,11 @@ export function registerFlightTools(factory: ToolFactory, getBot: () => mineflay
 
       const bot = getBot();
 
-      if (!bot.creative) {
-        return factory.createResponse("Creative mode is not available. Cannot fly.");
+      if (!bot.creative || bot.game?.gameMode !== 'creative') {
+        return factory.createErrorResponse(
+          `fly-to requires creative mode (current gamemode: ${bot.game?.gameMode ?? 'unknown'}). ` +
+          `Use move-to-position for walking.`
+        );
       }
 
       const controller = new AbortController();

@@ -5,6 +5,7 @@ export interface ServerConfig {
   host: string;
   port: number;
   username: string;
+  chatLog: string;
 }
 
 export function parseConfig(): ServerConfig {
@@ -23,6 +24,11 @@ export function parseConfig(): ServerConfig {
       type: 'string',
       description: 'Bot username',
       default: 'LLMBot'
+    })
+    .option('chat-log', {
+      type: 'string',
+      description: 'Path to append chat messages to (JSONL)',
+      default: ''
     })
     .help()
     .alias('help', 'h')

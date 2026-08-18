@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, ZodError, ZodRawShape, ZodType } from "zod";
-import { BotConnection } from './bot-connection.js';
+import type { BotConnection } from './bot-connection.js';
+import { botContext } from './bot-context.js';
 
 type McpResponse = {
   content: { type: "text"; text: string }[];
@@ -8,10 +9,15 @@ type McpResponse = {
   [key: string]: unknown;
 };
 
+export interface BotManagerLike {
+  getPrimaryName(): string;
+  getConnection(name?: string): BotConnection;
+}
+
 export class ToolFactory {
   constructor(
     private server: McpServer,
-    private connection: BotConnection
+    private manager: BotManagerLike
   ) {}
 
   registerTool(
@@ -21,8 +27,22 @@ export class ToolFactory {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     executor: (args: any) => Promise<McpResponse>
   ): void {
-    this.server.tool(name, description, schema, async (args: unknown): Promise<McpResponse> => {
-      const connectionCheck = await this.connection.checkConnectionAndReconnect();
+    const fullSchema = {
+      ...schema,
+      bot: z.string().optional().describe("Bot name to control (defaults to primary bot)")
+    };
+
+    this.server.tool(name, description, fullSchema, async (args: unknown): Promise<McpResponse> => {
+      const parsed = this.shouldValidateSchema(fullSchema)
+        ? this.parseArgs(fullSchema as ZodRawShape, args)
+        : (args ?? {});
+      const parsedArgs = parsed as Record<string, unknown>;
+
+      const botName = parsedArgs.bot as string | undefined;
+      const targetName = botName ?? this.manager.getPrimaryName();
+
+      const connection = this.manager.getConnection(targetName);
+      const connectionCheck = await connection.checkConnectionAndReconnect();
 
       if (!connectionCheck.connected) {
         return {
@@ -32,10 +52,7 @@ export class ToolFactory {
       }
 
       try {
-        const parsedArgs = this.shouldValidateSchema(schema)
-          ? this.parseArgs(schema as ZodRawShape, args)
-          : args;
-        return await executor(parsedArgs);
+        return await botContext.run(targetName, () => executor(parsedArgs));
       } catch (error) {
         return this.createErrorResponse(error as Error);
       }

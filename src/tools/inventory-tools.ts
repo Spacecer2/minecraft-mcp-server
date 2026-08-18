@@ -8,6 +8,30 @@ interface InventoryItem {
   slot: number;
 }
 
+export type ResolveItemResult<T extends { name: string }> =
+  | { kind: 'exact'; item: T }
+  | { kind: 'ambiguous'; matches: string[] }
+  | { kind: 'none' };
+
+export function resolveItem<T extends { name: string }>(items: T[], query: string): ResolveItemResult<T> {
+  const q = query.trim().toLowerCase();
+  const exact = items.find((item) => item.name.toLowerCase() === q);
+  if (exact) return { kind: 'exact', item: exact };
+
+  const partial = items.filter((item) => item.name.toLowerCase().includes(q));
+  if (partial.length > 1) {
+    return { kind: 'ambiguous', matches: partial.map((item) => item.name) };
+  }
+  if (partial.length === 1) {
+    return { kind: 'exact', item: partial[0] };
+  }
+  return { kind: 'none' };
+}
+
+export function formatAmbiguousMatch(query: string, matches: string[]): string {
+  return `Ambiguous match for '${query}'. Matches: ${matches.join(', ')}. Please specify the exact name.`;
+}
+
 export function registerInventoryTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
   factory.registerTool(
     "list-inventory",
@@ -44,15 +68,18 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
     async ({ nameOrType }) => {
       const bot = getBot();
       const items = bot.inventory.items();
-      const item = items.find((item) =>
-        item.name.includes(nameOrType.toLowerCase())
-      );
+      const resolved = resolveItem(items, nameOrType);
 
-      if (item) {
-        return factory.createResponse(`Found ${item.count} ${item.name} in inventory (slot ${item.slot})`);
-      } else {
+      if (resolved.kind === 'ambiguous') {
+        return factory.createResponse(formatAmbiguousMatch(nameOrType, resolved.matches));
+      }
+
+      if (resolved.kind === 'none') {
         return factory.createResponse(`Couldn't find any item matching '${nameOrType}' in inventory`);
       }
+
+      const item = resolved.item;
+      return factory.createResponse(`Found ${item.count} ${item.name} in inventory (slot ${item.slot})`);
     }
   );
 
@@ -66,14 +93,17 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
     async ({ itemName, destination = 'hand' }) => {
       const bot = getBot();
       const items = bot.inventory.items();
-      const item = items.find((item) =>
-        item.name.includes(itemName.toLowerCase())
-      );
+      const resolved = resolveItem(items, itemName);
 
-      if (!item) {
+      if (resolved.kind === 'ambiguous') {
+        return factory.createResponse(formatAmbiguousMatch(itemName, resolved.matches));
+      }
+
+      if (resolved.kind === 'none') {
         return factory.createResponse(`Couldn't find any item matching '${itemName}' in inventory`);
       }
 
+      const item = resolved.item;
       await bot.equip(item, destination as mineflayer.EquipmentDestination);
       return factory.createResponse(`Equipped ${item.name} to ${destination}`);
     }

@@ -4,6 +4,7 @@ import type { Item } from 'prismarine-item';
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
+import { resolveItem, formatAmbiguousMatch } from './inventory-tools.js';
 
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker']);
 
@@ -55,15 +56,23 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       }
 
       const items = bot.inventory.items();
-      const input = items.find((item) => item.name.includes(inputItem.toLowerCase()));
-      if (!input) {
+      const inputResolved = resolveItem(items, inputItem);
+      if (inputResolved.kind === 'ambiguous') {
+        return factory.createResponse(formatAmbiguousMatch(inputItem, inputResolved.matches));
+      }
+      if (inputResolved.kind === 'none') {
         return factory.createResponse(`Couldn't find any item matching '${inputItem}' in inventory`);
       }
+      const input = inputResolved.item;
 
-      const fuel = items.find((item) => item.name.includes(fuelItem.toLowerCase()));
-      if (!fuel) {
+      const fuelResolved = resolveItem(items, fuelItem);
+      if (fuelResolved.kind === 'ambiguous') {
+        return factory.createResponse(formatAmbiguousMatch(fuelItem, fuelResolved.matches));
+      }
+      if (fuelResolved.kind === 'none') {
         return factory.createResponse(`Couldn't find any fuel item matching '${fuelItem}' in inventory`);
       }
+      const fuel = fuelResolved.item;
 
       const resolvedInputCount = Math.min(inputCount, input.count);
       const resolvedFuelCount = Math.min(fuelCount, fuel.count);
