@@ -29,6 +29,15 @@ export const EVENT_NAMES = [
 
 export type WatchdogEvent = (typeof EVENT_NAMES)[number];
 
+/**
+ * Events that are triggered purely by mineflayer listeners, NOT the polled
+ * tick loop. `death` and `reorient` have no polled equivalent — they only fire
+ * when their bot event fires. `chat` is handled by the background chat
+ * listener. Each handler guards on `enabledEvents`, so these events only
+ * preempt when explicitly enabled.
+ */
+export const EVENT_DRIVEN_EVENT_NAMES = ['death', 'reorient', 'chat'] as const;
+
 /** Events are evaluated in this priority order; the first that fires wins this tick. */
 const EVENT_PRIORITY: WatchdogEvent[] = [
   'void', 'on-fire', 'creeper', 'fall', 'drowning', 'lava', 'hostile',
@@ -54,7 +63,9 @@ const EVENT_MODES: Record<string, string> = {
   night: 'sleep',
   drowning: 'surface',
   'inventory-full': 'inventory',
-  chat: 'listen'
+  chat: 'listen',
+  death: 'dead',
+  reorient: 'reorient'
 };
 
 type Entity = ReturnType<Bot['nearestEntity']>;
@@ -99,12 +110,18 @@ export class Watchdog {
   private chatHandler: ((username: string, message: string) => void) | null = null;
   /** Whether the background chat listener is attached. */
   private chatListening = false;
+  /** Bound mineflayer event handlers (event -> interrupt). */
+  private eventHandler: Record<string, (...args: unknown[]) => void> | null = null;
+  /** Whether the event-driven listeners are attached. */
+  private eventListening = false;
 
   setBot(bot: Bot): void {
-    // Re-attach the chat listener if it was active on the previous bot.
+    // Re-attach listeners that were active on the previous bot.
     const wasListening = this.chatListening;
+    const wasEventListening = this.eventListening;
     this.bot = bot;
     if (wasListening) this.attachChatListener();
+    if (wasEventListening) this.attachEventListeners();
   }
 
   setListener(listener: WatchdogListener | null): void {
@@ -136,12 +153,17 @@ export class Watchdog {
     // The chat listener runs in the background (parallel) and interrupts on
     // player chat; attach it whenever 'chat' is enabled.
     if (this.enabledEvents.has('chat')) this.attachChatListener();
+    // The mineflayer event listeners fire instantly and interrupt the moment
+    // an event happens; each handler guards on enabledEvents, so attaching
+    // them while running is safe even for disabled events.
+    this.attachEventListeners();
   }
 
   stopWatchdog(): void {
     this.clearTimer();
     this.running = false;
     this.detachChatListener();
+    this.detachEventListeners();
   }
 
   /**
@@ -177,6 +199,115 @@ export class Watchdog {
     this.chatListening = false;
   }
 
+  /**
+   * Attach mineflayer event listeners that preempt the agent the INSTANT the
+   * event fires — no polling latency. These run in parallel with the polled
+   * tick loop (which remains the fallback for events with no listener: lava,
+   * fall, void, night, hunger, inventory-full). Idempotent. Each handler:
+   *
+   *   - no-ops while an interrupt is already pending (isInterrupted())
+   *   - guards on the event being enabled (enabledEvents)
+   *   - triggers with an event-specific directive + mode
+   */
+  attachEventListeners(): void {
+    const bot = this.bot;
+    if (!bot || this.eventListening) return;
+    this.eventListening = true;
+    const handlers = (this.eventHandler = {
+      death: () => {
+        if (isInterrupted()) return;
+        if (!this.enabledEvents.has('death')) return;
+        this.trigger(
+          'death',
+          'DIED — CANCEL current action; auto-respawning, then resume if possible. Report the death.'
+        );
+        this.defensiveRespawn();
+      },
+      health: () => {
+        if (isInterrupted()) return;
+        if (!this.enabledEvents.has('low-health')) return;
+        const health = this.bot?.health;
+        const limit = this.threshold('lowHealth', 6);
+        if (typeof health !== 'number' || health >= limit) return;
+        this.trigger(
+          'low-health',
+          `low health (<${limit}) — CANCEL; switch to DEFENSE/HEAL: flee, eat, or retreat.`
+        );
+      },
+      entityHurt: (entity: unknown) => {
+        if (isInterrupted()) return;
+        if (!this.enabledEvents.has('low-health')) return;
+        const bot = this.bot;
+        const selfId = bot?.entity?.id;
+        const hurt = entity as { id?: number };
+        if (selfId === undefined || !hurt || hurt.id !== selfId) return;
+        const health = bot?.health;
+        const limit = this.threshold('lowHealth', 6);
+        if (typeof health !== 'number' || health >= limit) return;
+        this.trigger(
+          'low-health',
+          `low health (<${limit}) — CANCEL; switch to DEFENSE/HEAL: flee, eat, or retreat.`
+        );
+      },
+      forcedMove: () => {
+        if (isInterrupted()) return;
+        if (!this.enabledEvents.has('reorient')) return;
+        this.trigger(
+          'reorient',
+          'FORCED MOVE — position changed; invalidate pathfinding and re-orient.'
+        );
+      },
+      breath: () => {
+        if (isInterrupted()) return;
+        if (!this.enabledEvents.has('drowning')) return;
+        const oxygen = this.bot?.oxygenLevel;
+        if (typeof oxygen !== 'number' || oxygen >= 10) return;
+        this.trigger('drowning', 'drowning — CANCEL; swim to surface.');
+      }
+    });
+    bot.on('death', handlers.death);
+    bot.on('health', handlers.health);
+    bot.on('entityHurt', handlers.entityHurt);
+    bot.on('forcedMove', handlers.forcedMove);
+    bot.on('breath', handlers.breath);
+  }
+
+  /** Detach the mineflayer event listeners (idempotent). */
+  detachEventListeners(): void {
+    const bot = this.bot;
+    if (this.eventHandler) {
+      try {
+        bot?.removeListener('death', this.eventHandler.death);
+        bot?.removeListener('health', this.eventHandler.health);
+        bot?.removeListener('entityHurt', this.eventHandler.entityHurt);
+        bot?.removeListener('forcedMove', this.eventHandler.forcedMove);
+        bot?.removeListener('breath', this.eventHandler.breath);
+      } catch {
+        // best-effort
+      }
+      this.eventHandler = null;
+    }
+    this.eventListening = false;
+  }
+
+  /**
+   * Defensive manual respawn after a 'death' event. Auto-respawn is on by
+   * default, so this is normally a no-op; it only matters if the bot was
+   * created with respawn:false. Best-effort (never throws).
+   */
+  private defensiveRespawn(): void {
+    const bot = this.bot;
+    if (!bot) return;
+    try {
+      const respawn = (bot as { respawn?: () => unknown }).respawn;
+      if (typeof respawn !== 'function') return;
+      const promise = respawn() as Promise<unknown>;
+      if (promise && typeof promise.catch === 'function') promise.catch(() => {});
+    } catch {
+      // best-effort
+    }
+  }
+
   private isSelfChat(username: string): boolean {
     const bot = this.bot;
     return Boolean(bot && bot.username && username === bot.username);
@@ -195,10 +326,13 @@ export class Watchdog {
     this.mode = mode;
   }
 
-  /** Enable a watchdog event (e.g. 'chat'). Attaches the chat listener for event-driven events. */
+  /** Enable a watchdog event. Attaches listeners for event-driven events. */
   enableEvent(event: string): void {
     this.enabledEvents.add(event);
     if (event === 'chat') this.attachChatListener();
+    if (event === 'death' || event === 'reorient' || event === 'low-health' || event === 'drowning') {
+      this.attachEventListeners();
+    }
   }
 
   /** Disable a watchdog event. Detaches the chat listener if it was the last reason to keep it. */
@@ -225,6 +359,7 @@ export class Watchdog {
   resetForTest(): void {
     this.stopWatchdog();
     this.detachChatListener();
+    this.detachEventListeners();
     this.mode = 'idle';
     this.prevMode = null;
     this.intervalMs = 500;

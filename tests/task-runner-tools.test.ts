@@ -272,7 +272,7 @@ test.serial('run-goal returns an error for an unknown goal', async (t) => {
   t.true(!!result.isError);
   t.true(
     result.content[0].text.includes(
-      "Unknown goal 'fly to the moon'. Supported: build <template>, collect <n> <item>, harvest <crop>, give/drop <food>."
+      "Unknown goal 'fly to the moon'. Supported: build <template>, collect <n> <item>, harvest <crop>, give/drop <item>, drop me some bread."
     )
   );
 });
@@ -397,7 +397,7 @@ test.serial('abort-task marks the task failed and clears its plan', async (t) =>
   t.true(st.content[0].text.includes('Error: aborted by user'));
 });
 
-test.serial('run-goal returns INTERRUPTED when the interrupt flag is set', async (t) => {
+test.serial('run-goal pauses (watchdog-paused) when the interrupt flag is set', async (t) => {
   clearInterrupt();
   setInterrupt('test');
   t.teardown(() => clearInterrupt());
@@ -408,7 +408,10 @@ test.serial('run-goal returns INTERRUPTED when the interrupt flag is set', async
 
   const result = await runGoal({ goal: 'build a house' });
   t.true(!!result.isError);
-  t.true(result.content[0].text.includes('INTERRUPTED'));
+  // run-goal is the parent: a standing interrupt pauses it via the watchdog
+  // guard before the child plan runs.
+  t.true(result.content[0].text.includes('Paused before starting'));
+  t.true(result.content[0].text.includes('read-interrupt'));
 });
 
 test.serial('run-task-step returns INTERRUPTED and leaves the task resumable', async (t) => {
@@ -430,4 +433,102 @@ test.serial('run-task-step returns INTERRUPTED and leaves the task resumable', a
 
   const st = await status({});
   t.true(st.content[0].text.includes('Status: running'));
+});
+
+test.serial('run-goal barricade places blocks when the bot has a barrier block', async (t) => {
+  const placed = new Set<string>();
+  const blockAt = sinon.stub().callsFake((pos: Vec3) => {
+    const key = `${pos.floored().x},${pos.floored().y},${pos.floored().z}`;
+    if (pos.y < 64) return { name: 'stone', position: pos };
+    return { name: placed.has(key) ? 'cobblestone' : 'air', position: pos };
+  });
+  const placeBlock = sinon.stub().callsFake(async (ref: { position: Vec3 }, face: Vec3) => {
+    const pos = ref.position.plus(face);
+    placed.add(`${pos.floored().x},${pos.floored().y},${pos.floored().z}`);
+  });
+  const hostile: EntityLike = { type: 'mob', name: 'zombie', position: new Vec3(6, 64, 0) };
+  const inventory = sinon.stub().returns([{ name: 'cobblestone', count: 64, slot: 1 }]);
+  const nearestEntity = sinon.stub().callsFake((filter: (e: EntityLike) => boolean) => (filter(hostile) ? hostile : null));
+  const goto = sinon.stub().resolves();
+  const canSeeBlock = sinon.stub().returns(true);
+  const lookAt = sinon.stub().resolves();
+
+  const bot = {
+    version: '1.21',
+    entity: { position: new Vec3(0, 64, 0) },
+    blockAt,
+    placeBlock,
+    inventory: { items: inventory },
+    nearestEntity,
+    pathfinder: { goto },
+    canSeeBlock,
+    lookAt
+  } as unknown as Partial<mineflayer.Bot>;
+
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
+
+  const result = await runGoal({ goal: 'barricade' });
+  t.false(!!result.isError);
+  t.true(result.content[0].text.includes('barricaded'));
+  t.true(placeBlock.called);
+});
+
+test.serial('run-goal trade routes to villager trading', async (t) => {
+  const villager: EntityLike = { type: 'mob', name: 'villager', position: new Vec3(2, 64, 0) };
+  const trades = [{ output: { name: 'bread' } }];
+  let inv: InvItem[] = [];
+  const inventory = sinon.stub().callsFake(() => inv);
+  const nearestEntity = sinon.stub().callsFake((filter: (e: EntityLike) => boolean) => (filter(villager) ? villager : null));
+  const trade = sinon.stub().callsFake(async () => {
+    inv = [...inv, { name: 'bread', count: 1, slot: 2 }];
+  });
+  const openVillager = sinon.stub().callsFake(async () => ({ trades, trade, close: () => {} }));
+
+  const bot = {
+    version: '1.21',
+    entity: { position: new Vec3(0, 64, 0) },
+    inventory: { items: inventory },
+    nearestEntity,
+    openVillager
+  } as unknown as Partial<mineflayer.Bot>;
+
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
+
+  const result = await runGoal({ goal: 'trade for' });
+  t.false(!!result.isError);
+  t.true(result.content[0].text.includes('traded with villager'));
+  t.true(trade.called);
+});
+
+test.serial('run-goal chest routes to chest withdraw', async (t) => {
+  const chest = { name: 'chest', position: new Vec3(3, 64, 0) };
+  let inv: InvItem[] = [];
+  const inventory = sinon.stub().callsFake(() => inv);
+  const findBlock = sinon.stub().returns(chest);
+  const withdraw = sinon.stub().callsFake(async () => {
+    inv = [...inv, { name: 'wheat', count: 4, slot: 1 }];
+  });
+  const openContainer = sinon.stub().callsFake(async () => ({
+    containerItems: () => [{ name: 'wheat', type: 296, count: 4 }],
+    withdraw,
+    close: () => {}
+  }));
+
+  const bot = {
+    version: '1.21',
+    entity: { position: new Vec3(0, 64, 0) },
+    inventory: { items: inventory },
+    findBlock,
+    openContainer
+  } as unknown as Partial<mineflayer.Bot>;
+
+  const { getExecutor } = setup(bot);
+  const runGoal = getExecutor('run-goal');
+
+  const result = await runGoal({ goal: 'open chest from' });
+  t.false(!!result.isError);
+  t.true(result.content[0].text.includes('withdrew wheat'));
+  t.true(withdraw.called);
 });

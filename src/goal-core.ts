@@ -11,6 +11,7 @@
  */
 import mineflayer from 'mineflayer';
 import { checkInterrupt, isInterruptError, getInterruptReason } from './interrupt.js';
+import { bestOption, UtilityInput } from './utility.js';
 
 export type GoalStepResult =
   | { status: 'done'; report: string }
@@ -108,4 +109,22 @@ export async function executeGoal(ctx: GoalContext, spec: GoalSpec): Promise<Goa
   }
 
   return { status: 'done', report: ctx.report.join(' → ') };
+}
+
+/** A named fallback option with its utility input, used to pick the best one. */
+export interface WeightedFallback {
+  id: string;
+  input: UtilityInput;
+}
+
+/**
+ * Choose the highest-utility fallback (the "dopamine" weighting). Returns the
+ * id of the best option, or null if there are none. Steps use this to decide
+ * among alternatives (e.g. walk to a far villager vs. harvest nearby wheat) by
+ * cost/benefit rather than hardcoded order.
+ */
+export function pickBestFallback(options: WeightedFallback[]): string | null {
+  if (options.length === 0) return null;
+  const best = bestOption(options, (opt) => opt.input);
+  return best ? best.id : null;
 }

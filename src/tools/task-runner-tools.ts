@@ -7,7 +7,9 @@ import { Block } from 'prismarine-block';
 import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { checkInterrupt, isInterruptError, getInterruptReason } from '../interrupt.js';
-import { createGoalContext, executeGoal, GoalContext, GoalStep, GoalStepResult, GoalSpec } from '../goal-core.js';
+import { GoalContext, GoalStep, GoalStepResult, GoalSpec } from '../goal-core.js';
+import { orchestrateGoal } from '../goal-orchestrator.js';
+import { utility, estimateDistance, estimateRiskNearby } from '../utility.js';
 import * as gatherTools from './gather-tools.js';
 import {
   generateTemplate,
@@ -558,6 +560,69 @@ async function gatherIngredient(bot: mineflayer.Bot, ingredient: string, want: n
   return countItemInInventory(bot, ingredient);
 }
 
+/** Try to obtain `want` of an ingredient by trading with a nearby villager. */
+async function tryTradeIngredient(bot: mineflayer.Bot, ingredient: string, want: number): Promise<boolean> {
+  let v: { name?: string } | null = null;
+  try {
+    v = bot.nearestEntity?.((e: { name?: string }) => e.name === 'villager') ?? null;
+  } catch {
+    return false;
+  }
+  if (!v) return false;
+  let window: { close?: () => void } | null = null;
+  try {
+    const opened = await bot.openVillager?.(v as never);
+    window = opened as unknown as { close?: () => void };
+    const trades = (opened as unknown as { trades?: Array<{ output?: { name?: string }; firstInput?: { name?: string } }> }).trades ?? [];
+    const idx = trades.findIndex((t) => t.output?.name === ingredient);
+    if (idx < 0) return false;
+    const before = countItemInInventory(bot, ingredient);
+    await (opened as unknown as { trade: (i: number, times: number) => Promise<void> }).trade(idx, Math.ceil(want));
+    return countItemInInventory(bot, ingredient) > before;
+  } catch {
+    return false;
+  } finally {
+    try {
+      window?.close?.();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/** Try to withdraw `want` of an ingredient from a nearby chest. */
+async function tryWithdrawFromChest(bot: mineflayer.Bot, ingredient: string, want: number): Promise<boolean> {
+  const mcData = minecraftData(bot.version);
+  const chestId = mcData.blocksByName.chest?.id;
+  if (typeof chestId !== 'number') return false;
+  let chest: { position?: { x: number; y: number; z: number } } | null = null;
+  try {
+    chest = bot.findBlock?.({ matching: chestId, maxDistance: 24 }) ?? null;
+  } catch {
+    return false;
+  }
+  if (!chest) return false;
+  let window: { close?: () => void } | null = null;
+  try {
+    const opened = await bot.openContainer?.(chest as never);
+    window = opened as unknown as { close?: () => void };
+    const items = (opened as unknown as { containerItems: () => Array<{ name?: string; type?: number; count?: number }> }).containerItems();
+    const match = items.find((i) => i.name === ingredient);
+    if (!match || (match.count ?? 0) <= 0) return false;
+    const before = countItemInInventory(bot, ingredient);
+    await (opened as unknown as { withdraw: (t: number, m: unknown, n: number) => Promise<void> }).withdraw(match.type ?? 0, null, Math.min(want, match.count ?? want));
+    return countItemInInventory(bot, ingredient) > before;
+  } catch {
+    return false;
+  } finally {
+    try {
+      window?.close?.();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 /** Check the recipe, gather missing ingredients, craft, then verify the crafted item. */
 export function makeFoodStep(itemName: string, count: number): GoalStep {
   return {
@@ -585,9 +650,82 @@ export function makeFoodStep(itemName: string, count: number): GoalStep {
       let haveIngredient = countItemInInventory(bot, recipe.ingredient);
 
       if (haveIngredient < neededIngredient) {
-        await gatherIngredient(bot, recipe.ingredient, neededIngredient - haveIngredient);
+        // Utility-weighted fallback: pick the cheapest source (dopamine system).
+        const origin = bot.entity?.position;
+        let wheatPos: { x: number; y: number; z: number } | null = null;
+        try {
+          const mc = minecraftData(bot.version);
+          const id = mc.blocksByName[recipe.ingredient]?.id;
+          if (typeof id === 'number') {
+            const f = bot.findBlock?.({ matching: id, maxDistance: SEARCH_DISTANCE });
+            if (f?.position) wheatPos = f.position as { x: number; y: number; z: number };
+          }
+        } catch {
+          wheatPos = null;
+        }
+        const options: Array<{ id: string; run: () => Promise<boolean>; input: Parameters<typeof utility>[0] }> = [
+          {
+            id: 'harvest',
+            run: async () => {
+              await gatherIngredient(bot, recipe.ingredient, neededIngredient - countItemInInventory(bot, recipe.ingredient));
+              return countItemInInventory(bot, recipe.ingredient) >= neededIngredient;
+            },
+            input: {
+              value: 0.8,
+              importance: 0.9,
+              distanceBlocks: wheatPos ? estimateDistance({ entity: { position: origin } }, wheatPos) : 60,
+              timeSeconds: 12,
+              risk: estimateRiskNearby(bot)
+            }
+          },
+          {
+            id: 'villager',
+            run: async () => {
+              const v = bot.nearestEntity?.((e: { name?: string }) => e.name === 'villager');
+              return Boolean(v) && (await tryTradeIngredient(bot, recipe.ingredient, neededIngredient));
+            },
+            input: {
+              value: 0.9,
+              importance: 0.8,
+              distanceBlocks: 40,
+              timeSeconds: 20,
+              risk: estimateRiskNearby(bot)
+            }
+          },
+          {
+            id: 'chest',
+            run: async () => {
+              const mc = minecraftData(bot.version);
+              const cid = mc.blocksByName.chest?.id;
+              const chest = typeof cid === 'number' ? bot.findBlock?.({ matching: cid, maxDistance: 24 }) : null;
+              return Boolean(chest) && (await tryWithdrawFromChest(bot, recipe.ingredient, neededIngredient));
+            },
+            input: {
+              value: 0.6,
+              importance: 0.7,
+              distanceBlocks: 24,
+              timeSeconds: 8,
+              risk: 0
+            }
+          }
+        ];
+
+        let gathered = false;
+        // Try up to 2 highest-utility fallbacks, then escalate.
+        const ordered = [...options].sort((a, b) => utility(b.input) - utility(a.input)).slice(0, 2);
+        for (const opt of ordered) {
+          try {
+            if (await opt.run()) {
+              gathered = true;
+              break;
+            }
+          } catch {
+            // try next fallback
+          }
+        }
+
         haveIngredient = countItemInInventory(bot, recipe.ingredient);
-        if (haveIngredient < neededIngredient) {
+        if (!gathered || haveIngredient < neededIngredient) {
           return {
             status: 'blocked',
             intensity: 3,
@@ -638,6 +776,205 @@ export function makeFoodStep(itemName: string, count: number): GoalStep {
         };
       }
       return { status: 'done', report: `made ${itemName} x${made}` };
+    }
+  };
+}
+
+/**
+ * Defensive skill: barricade the bot by placing blocks to shield against nearby
+ * enemies. Places a small wall of a barrier block around the bot, between it and
+ * the nearest threat, so it can retreat/regroup. Uses blocks already in the
+ * inventory (dirt/cobblestone/stone preferred), falls back to whatever is handy.
+ */
+export function barricadeStep(): GoalStep {
+  return {
+    name: 'barricade',
+    run: async (ctx: GoalContext): Promise<GoalStepResult> => {
+      const bot = ctx.bot;
+      const origin = bot.entity?.position;
+      if (!origin) {
+        return { status: 'blocked', intensity: 2, reason: 'no position to barricade around', context: {} };
+      }
+
+      // Pick a barrier block from inventory (prefer cobblestone/stone/dirt).
+      const items = bot.inventory?.items?.() ?? [];
+      const barrierName =
+        items.find((i) => i.name === 'cobblestone')?.name ||
+        items.find((i) => i.name === 'stone')?.name ||
+        items.find((i) => i.name === 'dirt')?.name ||
+        items.find((i) => i.name === 'oak_planks')?.name ||
+        items.find((i) => i.name === 'sand')?.name;
+      if (!barrierName) {
+        return {
+          status: 'blocked',
+          intensity: 2,
+          reason: 'no block in inventory to barricade with',
+          context: { inventory: items.map((i) => i.name) }
+        };
+      }
+
+      // Find the nearest threat to know which way to shield.
+      let threatDir: { x: number; z: number } | null = null;
+      try {
+        const hostile = bot.nearestEntity?.((e: { type?: string; name?: string }) =>
+          Boolean(e.type === 'mob' || (e.name && /zombie|skeleton|spider|creeper|slime/.test(e.name)))
+        );
+        if (hostile?.position) {
+          const d = hostile.position.minus(origin);
+          const len = Math.sqrt(d.x * d.x + d.z * d.z) || 1;
+          threatDir = { x: d.x / len, z: d.z / len };
+        }
+      } catch {
+        threatDir = null;
+      }
+      // Default shield direction (south) if no threat detected.
+      const dir = threatDir ?? { x: 0, z: 1 };
+
+      // Place a 3-wide, 2-tall wall ~2 blocks from the bot toward the threat.
+      const wallDistance = 2;
+      const baseX = Math.floor(origin.x + dir.x * wallDistance);
+      const baseZ = Math.floor(origin.z + dir.z * wallDistance);
+      const baseY = Math.floor(origin.y);
+      const perpX = -dir.z;
+      const perpZ = dir.x;
+
+      let placed = 0;
+      const failures: string[] = [];
+      for (const off of [-1, 0, 1]) {
+        for (const h of [0, 1]) {
+          const px = baseX + perpX * off;
+          const pz = baseZ + perpZ * off;
+          const py = baseY + h;
+          try {
+            await placeAt(bot, new Vec3(px, py, pz));
+            placed++;
+          } catch {
+            failures.push(`(${px},${py},${pz})`);
+          }
+        }
+      }
+
+      if (placed === 0) {
+        return {
+          status: 'blocked',
+          intensity: 2,
+          reason: `could not barricade with ${barrierName}`,
+          context: { failures }
+        };
+      }
+      ctx.record(`barricaded with ${barrierName} (${placed} blocks)`);
+      return { status: 'done', report: `barricaded with ${barrierName} (${placed} blocks) toward ${threatDir ? 'the threat' : 'default'}` };
+    }
+  };
+}
+
+/**
+ * Fallback: obtain an item by trading with a nearby villager. Used when the
+ * primary source (harvest/gather) is far or absent, weighted by utility.
+ */
+export function tradeWithVillagerStep(itemName: string, count: number): GoalStep {
+  return {
+    name: 'tradeWithVillager',
+    run: async (ctx: GoalContext): Promise<GoalStepResult> => {
+      const bot = ctx.bot;
+      let villager: { position?: { x: number; y: number; z: number } } | null = null;
+      try {
+        villager = bot.nearestEntity?.((e: { name?: string; type?: string }) => e.name === 'villager' || e.name === 'villager_v2') ?? null;
+      } catch {
+        villager = null;
+      }
+      if (!villager) {
+        return { status: 'blocked', intensity: 2, reason: 'no villager nearby to trade with', context: { item: itemName } };
+      }
+
+      let window: { trades?: Array<{ output?: { name?: string }; firstInput?: { name?: string } }>; close?: () => void } | null = null;
+      try {
+        const v = await bot.openVillager?.(villager as never);
+        window = v as unknown as { close?: () => void };
+        const trades = (v as unknown as { trades?: Array<{ output?: { name?: string }; firstInput?: { name?: string } }> }).trades ?? [];
+        const idx = trades.findIndex((t) => t.output?.name === itemName);
+        if (idx < 0) {
+          return { status: 'blocked', intensity: 2, reason: `villager has no ${itemName} trade`, context: { item: itemName } };
+        }
+        const before = countItemInInventory(bot, itemName);
+        await (v as unknown as { trade: (i: number, times: number) => Promise<void> }).trade(idx, count);
+        const after = countItemInInventory(bot, itemName);
+        if (after <= before) {
+          return { status: 'blocked', intensity: 2, reason: `trade for ${itemName} did not add to inventory`, context: { item: itemName } };
+        }
+        return { status: 'done', report: `traded with villager for ${itemName} x${after - before}` };
+      } catch (err) {
+        return {
+          status: 'blocked',
+          intensity: 2,
+          reason: `failed to trade with villager: ${err instanceof Error ? err.message : String(err)}`,
+          context: { item: itemName }
+        };
+      } finally {
+        try {
+          window?.close?.();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  };
+}
+
+/**
+ * Fallback: obtain an item from a nearby chest. Used when other sources fail,
+ * weighted by utility.
+ */
+export function openChestStep(itemName: string, count: number): GoalStep {
+  return {
+    name: 'openChest',
+    run: async (ctx: GoalContext): Promise<GoalStepResult> => {
+      const bot = ctx.bot;
+      const mcData = minecraftData(bot.version);
+      const chestId = mcData.blocksByName.chest?.id;
+      if (typeof chestId !== 'number') {
+        return { status: 'blocked', intensity: 2, reason: 'cannot look up chest block', context: { item: itemName } };
+      }
+      let chest: { position?: { x: number; y: number; z: number } } | null = null;
+      try {
+        chest = bot.findBlock?.({ matching: chestId, maxDistance: 24 }) ?? null;
+      } catch {
+        chest = null;
+      }
+      if (!chest) {
+        return { status: 'blocked', intensity: 2, reason: 'no chest nearby', context: { item: itemName } };
+      }
+
+      let window: { containerItems?: () => Array<{ name?: string; type?: number; count?: number }>; withdraw?: (...a: unknown[]) => Promise<void>; close?: () => void } | null = null;
+      try {
+        const c = await bot.openContainer?.(chest as never);
+        window = c as unknown as { close?: () => void };
+        const items = (c as unknown as { containerItems: () => Array<{ name?: string; type?: number; count?: number }> }).containerItems();
+        const match = items.find((i) => i.name === itemName);
+        if (!match || (match.count ?? 0) <= 0) {
+          return { status: 'blocked', intensity: 2, reason: `no ${itemName} in chest`, context: { item: itemName } };
+        }
+        const before = countItemInInventory(bot, itemName);
+        await (c as unknown as { withdraw: (t: number, m: unknown, n: number) => Promise<void> }).withdraw(match.type ?? 0, null, Math.min(count, match.count ?? count));
+        const after = countItemInInventory(bot, itemName);
+        if (after <= before) {
+          return { status: 'blocked', intensity: 2, reason: `withdraw of ${itemName} did not add to inventory`, context: { item: itemName } };
+        }
+        return { status: 'done', report: `withdrew ${itemName} x${after - before} from chest` };
+      } catch (err) {
+        return {
+          status: 'blocked',
+          intensity: 2,
+          reason: `failed to open/withdraw chest: ${err instanceof Error ? err.message : String(err)}`,
+          context: { item: itemName }
+        };
+      } finally {
+        try {
+          window?.close?.();
+        } catch {
+          // ignore
+        }
+      }
     }
   };
 }
@@ -842,9 +1179,62 @@ export function planGoal(text: string, opts: GoalPlanOpts): GoalPlan {
     return { ok: true, goalName: 'harvest crops', steps: [harvestCropsStep()] };
   }
 
+  // Defensive: barricade against nearby enemies.
+  if (lower.includes('barricade') || lower.includes('shield') || lower.includes('defend') || lower.includes('protect')) {
+    return { ok: true, goalName: 'barricade', steps: [barricadeStep()] };
+  }
+
+  // Trade with a villager for an item.
+  if (lower.includes('trade') || lower.includes('villager')) {
+    const item = lower
+      .replace(/^.*(?:trade|villager)\s+/, '')
+      .trim()
+      .replace(/\b(for|with|a|an|the|some|me|my)\b/g, '')
+      .trim()
+      .replace(/[^a-z_]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return { ok: true, goalName: `trade for ${item || 'item'}`, steps: [tradeWithVillagerStep(item || 'bread', 1)] };
+  }
+
+  // Get an item from a chest.
+  if (lower.includes('chest')) {
+    const item = lower
+      .replace(/^.*(?:chest|from)\s+/, '')
+      .trim()
+      .replace(/\b(from|the|a|an|some|me)\b/g, '')
+      .trim()
+      .replace(/[^a-z_]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return { ok: true, goalName: `get ${item || 'item'} from chest`, steps: [openChestStep(item || 'wheat', 1)] };
+  }
+
+  // General deliver: "give/drop/gimme/hand <item>" (optional count). Delivers
+  // the item already in inventory; if missing, escalates to the plan (blocked<3)
+  // so the front brain can decide. Works for ANY item, not just food/bread.
+  if (/give|drop|gimme|hand|deliver|pass/.test(lower)) {
+    // Count prefix: "give 3 wood" / "drop 5 rotten flesh"
+    const counted = lower.match(/(?:give|drop|gimme|hand|deliver|pass)\s+(\d+)\s+([a-z_ ]+)/);
+    // Item word extraction: strip the verb + filler words
+    const afterVerb = lower.replace(/^(?:please\s+)?(?:give|drop|gimme|hand|deliver|pass)(\s+(?:me|us|them))?\s+/, '');
+    const itemNameRaw = counted ? counted[2] : afterVerb;
+    const itemName = itemNameRaw
+      .replace(/\b(some|a|an|any|the|my|your|of|that|those|these)\b/g, '')
+      .trim()
+      .replace(/[^a-z_]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    const count = counted ? parseInt(counted[1], 10) : 1;
+    if (itemName && itemName.length > 0 && itemName !== 'me') {
+      return {
+        ok: true,
+        goalName: `deliver ${count} ${itemName}`,
+        steps: [deliverItemStep(itemName, count)]
+      };
+    }
+  }
+
   return {
     ok: false,
-    error: `Unknown goal '${text}'. Supported: build <template>, collect <n> <item>, harvest <crop>, give/drop <food>.`
+    error: `Unknown goal '${text}'. Supported: build <template>, collect <n> <item>, harvest <crop>, give/drop <item>, drop me some bread.`
   };
 }
 
@@ -879,9 +1269,11 @@ export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mine
       }
 
       const spec: GoalSpec = { name: plan.goalName, steps: plan.steps };
-      const outcome = await executeGoal(createGoalContext(bot), spec);
+      // run-goal is the PARENT: it delegates the goal to the orchestrator, which
+      // guards with the watchdog (parent-of-all safety) and runs the child plan.
+      const outcome = await orchestrateGoal(bot, spec);
 
-      if (outcome.status === 'interrupted') {
+      if (outcome.status === 'watchdog-paused') {
         return factory.createErrorResponse(outcome.report);
       }
 

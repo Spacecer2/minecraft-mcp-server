@@ -386,3 +386,73 @@ test.serial('listen tool reports background listening is active', async (t) => {
   t.true(res.content[0].text.includes('Listening for player chat'));
   t.is(watchdog.getMode(), 'listen');
 });
+
+test.serial('death event: emitting death triggers an interrupt in dead mode', async (t) => {
+  const clock = sinon.useFakeTimers();
+  try {
+    const bot = makeBot();
+    const { mockServer } = setupWithBot(bot);
+    const start = getToolExecutor(mockServer, 'watchdog-start');
+    await start({ events: ['low-health'] });
+    // 'death' is event-driven-only and not exposed in the tool's events enum,
+    // so enable it on the watchdog directly.
+    watchdog.enableEvent('death');
+
+    (bot as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit('death');
+
+    t.true(isInterrupted());
+    const reason = getInterruptReason() ?? '';
+    t.true(reason.includes('DIED'));
+    t.is(watchdog.getMode(), 'dead');
+    t.is(watchdog.triggerCount, 1);
+    t.is(watchdog.lastTrigger!.event, 'death');
+
+    const read = getToolExecutor(mockServer, 'read-interrupt');
+    const res = await read({});
+    t.true(res.content[0].text.includes('DIED'));
+  } finally {
+    clock.restore();
+    resetWatchdogForTest();
+  }
+});
+
+test.serial('health event: bot.health below 6 triggers low-health instantly', async (t) => {
+  const clock = sinon.useFakeTimers();
+  try {
+    const bot = makeBot({ health: 5 });
+    const { mockServer } = setupWithBot(bot);
+    const start = getToolExecutor(mockServer, 'watchdog-start');
+    await start({ events: ['low-health'] });
+
+    (bot as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit('health');
+
+    t.true(isInterrupted());
+    const reason = getInterruptReason() ?? '';
+    t.true(reason.includes('low health'));
+    t.is(watchdog.getMode(), 'defense');
+    t.is(watchdog.triggerCount, 1);
+    t.is(watchdog.lastTrigger!.event, 'low-health');
+  } finally {
+    clock.restore();
+    resetWatchdogForTest();
+  }
+});
+
+test.serial('death event does not trigger when death is not enabled', async (t) => {
+  const clock = sinon.useFakeTimers();
+  try {
+    const bot = makeBot();
+    const { mockServer } = setupWithBot(bot);
+    const start = getToolExecutor(mockServer, 'watchdog-start');
+    await start({ events: ['low-health'] }); // death NOT enabled
+
+    (bot as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit('death');
+
+    t.false(isInterrupted());
+    t.is(watchdog.triggerCount, 0);
+    t.is(watchdog.getMode(), 'idle');
+  } finally {
+    clock.restore();
+    resetWatchdogForTest();
+  }
+});
