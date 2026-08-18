@@ -27,6 +27,12 @@ import { registerPlanTools } from './tools/plan-tools.js';
 import { registerPerceptionTools } from './tools/perception-tools.js';
 import { registerGatherTools } from './tools/gather-tools.js';
 import { registerBlueprintTools } from './tools/blueprint-tools.js';
+import { registerTaskRunnerTools } from './tools/task-runner-tools.js';
+import { registerMapTools } from './tools/map-tools.js';
+import { registerContainerTools } from './tools/container-tools.js';
+import { registerQATools } from './tools/qa-tools.js';
+import { registerRedstoneBuildTools } from './tools/redstone-build.js';
+import { registerBlueprintStoreTools } from './tools/blueprint-store.js';
 import { z } from "zod";
 import * as fs from 'node:fs';
 
@@ -156,6 +162,12 @@ async function main() {
   registerPerceptionTools(factory, getBot);
   registerGatherTools(factory, getBot);
   registerBlueprintTools(factory, getBot);
+  registerTaskRunnerTools(factory, getBot);
+  registerMapTools(factory, getBot);
+  registerContainerTools(factory, getBot);
+  registerQATools(factory, getBot);
+  registerRedstoneBuildTools(factory, getBot);
+  registerBlueprintStoreTools(factory);
 
   process.stdin.on('end', () => {
     manager.cleanup();

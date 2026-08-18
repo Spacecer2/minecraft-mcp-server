@@ -28,3 +28,6 @@ pids/
 # graphify knowledge-graph artifacts
 graphify-out/
 src/graphify-out/
+
+# runtime blueprint store
+data/
