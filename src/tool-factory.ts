@@ -45,6 +45,28 @@ export interface RegisterToolOptions {
   visibility?: ToolVisibility;
 }
 
+/**
+ * A normalized result from dispatching a hidden 'primal' tool. `ok` is false
+ * when the executor returned an error (unknown tool name or thrown error) and
+ * `text` is the human-readable message the executor produced.
+ */
+export interface PrimalDispatchResult {
+  ok: boolean;
+  text: string;
+}
+
+/**
+ * Dispatch handle for invoking a hidden 'primal' tool by name. This is the seam
+ * the task-runner uses so its low-level goal steps can run the granular
+ * micro-tools (dig-block, place-block, collect-item, ...) through `callPrimal`
+ * instead of driving the bot directly. Returns a normalized result so callers
+ * do not need to understand the MCP response shape.
+ */
+export type PrimalDispatch = (
+  name: string,
+  args?: Record<string, unknown>
+) => Promise<PrimalDispatchResult>;
+
 export class ToolFactory {
   constructor(
     private server: McpServer,
@@ -78,9 +100,13 @@ export class ToolFactory {
   }
 
   /**
-   * Call a 'primal' (hidden) tool's executor directly. Mostly for tests and
-   * completeness — the primal brain calls the bot directly, not through tools.
-   * Returns an error response for unknown/unregistered names.
+   * Call a 'primal' (hidden) tool's executor directly. This is the intended
+   * invocation path for the internal executors: the task-runner obtains a
+   * `PrimalDispatch` handle via `makePrimalDispatcher(this)` and routes its
+   * low-level goal steps (gather, build, harvest, ...) through here so the
+   * granular micro-tools are genuinely executable rather than registered-but-
+   * dead. Returns an error response for unknown/unregistered names, so callers
+   * can detect a miss without throwing.
    */
   callPrimal(name: string, args: unknown): Promise<McpResponse> {
     const executor = this.primalExecutors.get(name);
@@ -88,7 +114,9 @@ export class ToolFactory {
       return Promise.resolve(this.createErrorResponse(`Unknown primal tool: ${name}`));
     }
     try {
-      return Promise.resolve(executor(args));
+      return Promise.resolve(executor(args)).catch((error) =>
+        this.createErrorResponse(error as Error)
+      );
     } catch (error) {
       return Promise.resolve(this.createErrorResponse(error as Error));
     }
@@ -189,4 +217,19 @@ export class ToolFactory {
 
     return `Invalid tool arguments: ${details}`;
   }
+}
+
+/**
+ * Build a `PrimalDispatch` handle bound to a factory's `callPrimal`. The
+ * task-runner obtains one of these (e.g. inside `run-goal`) so its goal steps
+ * can invoke hidden 'primal' micro-tools through `callPrimal`, normalizing the
+ * MCP response down to `{ ok, text }`. When the tool name is unknown,
+ * `callPrimal` returns an error response and the dispatcher reports `ok: false`.
+ */
+export function makePrimalDispatcher(factory: ToolFactory): PrimalDispatch {
+  return async (name: string, args: Record<string, unknown> = {}): Promise<PrimalDispatchResult> => {
+    const response = await factory.callPrimal(name, args);
+    const text = response.content?.[0]?.text ?? '';
+    return { ok: !response.isError, text };
+  };
 }

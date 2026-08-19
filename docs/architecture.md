@@ -267,13 +267,31 @@ oscillates and makes no progress. Six mechanisms form the contract.
 
 ### Current state vs. target contract
 
-Today the code has exactly one of these: a static per-tick `EVENT_PRIORITY`
-order. There is **no hysteresis, no cooldown, no minimum commitment duration,
-and no aggregation**. `tick()` evaluates events in priority order and the first
-that fires triggers immediately; the same condition can re-trigger on the next
-tick after recovery. This spec is the target contract those mechanisms are being
-added to satisfy. Until then, the system relies on the cooperative interrupt
-being cleared and re-armed, which is correct but not thrash-proof.
+All six mechanisms are implemented in `src/watchdog.ts`:
+
+- **Interrupt priorities** — fixed per-event order in `EVENT_PRIORITY`
+  (`watchdog.ts:48-51`) plus a per-event interrupt class in `PRIORITY_BY_EVENT`
+  (`watchdog.ts:83-98`); the first that fires wins the tick.
+- **Hysteresis** — `setHysteresis(ticks, event?)` records consecutive-tick
+  thresholds (`pendingTickCount`); a polled condition must persist for N
+  consecutive ticks before it may fire (`tick()`, `watchdog.ts:520-544`).
+- **Cooldowns** — `setCooldownMs(ms)` suppresses re-firing the SAME event for a
+  window after its last trigger (`trigger()`, `watchdog.ts:546-575`).
+- **Minimum commitment durations** — `noteCommitment(ms, priority)` /
+  `clearCommitment()` let a committed action (default P2) suppress same- or
+  lower-priority interrupts via `commitmentSuppresses()` (`watchdog.ts:622-627`).
+  P0/P1 safety/reflex interrupts always preempt.
+- **Event aggregation** — near-simultaneous triggers are batched into a bounded
+  rolling window (`recentTriggers`, max `maxRecentTriggers`) so a burst of
+  stimulus produces one decision, not a flood.
+- **Invalidation vs. resume** — `goalDisposition` (`DISPOSITION_BY_EVENT`,
+  `watchdog.ts:105-108`) marks a goal `resumable` or `invalid`; only resumable
+  goals are resumed after the interrupt.
+
+The cooperative channel (`src/interrupt.ts`) is priority-aware: `setInterrupt`
+overwrites only with a strictly higher-priority interrupt and suppresses
+same/lower priority, and `checkInterrupt()` throws `[INTERRUPTED]` between
+steps, so the system is thrash-proof rather than merely interrupt-clearing.
 
 The cooperative channel itself (`src/interrupt.ts`) is already well-shaped for
 this contract: `setInterrupt` is idempotent (returns true if already set),

@@ -21,6 +21,7 @@
 
 import { Vec3 } from 'vec3';
 import { weightsFromArousal } from './arousal.js';
+import { estimatePDeath, ThreatInput } from './risk-evaluator.js';
 
 export interface UtilityWeights {
   /** Multiplier on distance cost. Higher = more distance-averse. */
@@ -63,6 +64,13 @@ export interface UtilityInput {
   /** Risk 0..1 (0 = safe, 1 = certain death/loss). */
   risk?: number;
   /**
+   * Estimated probability of death 0..1 (from the L4 risk evaluator). Treated
+   * as an additional risk contributor: `riskWeight * pDeath` is added into the
+   * denominator, so a riskier option scores lower all else equal. Optional —
+   * when absent the score is unchanged (backward compatible).
+   */
+  pDeath?: number;
+  /**
    * HARD-CONSTRAINT VETO (P0). When true the option violates a safety
    * invariant (drowning / lava / void / low health) and is disqualified
    * outright: utility() returns -Infinity, so bestOption can never select it.
@@ -85,7 +93,8 @@ export function utility(input: UtilityInput, w: UtilityWeights = DEFAULT_WEIGHTS
   const distanceCost = w.distanceWeight * ((input.distanceBlocks ?? 0) / 100);
   const timeCost = w.timeWeight * ((input.timeSeconds ?? 0) / 120);
   const riskCost = w.riskWeight * clamp01(input.risk ?? 0);
-  const denominator = 1 + distanceCost + timeCost + riskCost;
+  const pDeathCost = w.riskWeight * clamp01(input.pDeath ?? 0);
+  const denominator = 1 + distanceCost + timeCost + riskCost + pDeathCost;
   return (value * importance) / denominator;
 }
 
@@ -295,4 +304,129 @@ export function estimateRiskNearby(
   }
   if (mobs <= 0) return 0;
   return Math.min(1, mobs * 0.5);
+}
+
+// ---------------------------------------------------------------------------
+// RISK-AWARE UTILITY (L4 risk-evaluator wiring)
+//
+// Thin glue between the soft utility weighting and the pure risk evaluator:
+// derive an estimated probability of death from the bot's live state and feed
+// it into utility() as an additional risk term. Defensive: unknown bot state
+// contributes no risk (pDeath stays 0), so partial/fake bots never inflate it.
+// ---------------------------------------------------------------------------
+
+/**
+ * The minimal bot view the risk wrapper reads. Everything is optional so real
+ * mineflayer bots and test fakes both work; unknown fields are skipped.
+ */
+export type RiskBot = SafetyBot & {
+  entities?:
+    | Map<number, { type?: string; position?: { x: number; y: number; z: number } }>
+    | Record<number, { type?: string; position?: { x: number; y: number; z: number } }>;
+  /** mineflayer fire ticks; > 0 while burning. */
+  fireTicks?: number;
+  entity?: SafetyBot['entity'] & { onFire?: boolean };
+};
+
+function nearestHostileDistance(bot: RiskBot | null | undefined): number | undefined {
+  if (!bot?.entity?.position) return undefined;
+  const entities = bot.entities;
+  if (!entities) return undefined;
+  const pos = bot.entity.position;
+  let best = Infinity;
+  const iterable = entities instanceof Map ? Array.from(entities.values()) : Object.values(entities);
+  for (const e of iterable) {
+    if (!e || e.type !== 'mob') continue;
+    const d = estimateDistance({ entity: { position: pos } }, e.position);
+    if (d < best) best = d;
+  }
+  return Number.isFinite(best) ? best : undefined;
+}
+
+function lavaNearby(bot: SafetyBot | null | undefined): boolean {
+  if (typeof bot?.blockAt !== 'function') return false;
+  const pos = bot.entity?.position;
+  if (!pos) return false;
+  const x = Math.floor(pos.x);
+  const y = Math.floor(pos.y);
+  const z = Math.floor(pos.z);
+  const cells = [
+    new Vec3(x, y, z),
+    new Vec3(x + 1, y, z),
+    new Vec3(x - 1, y, z),
+    new Vec3(x, y, z + 1),
+    new Vec3(x, y, z - 1),
+    new Vec3(x, y - 1, z)
+  ];
+  for (const cell of cells) {
+    try {
+      const name = bot.blockAt(cell)?.name;
+      if (name === 'lava' || name === 'flowing_lava') return true;
+    } catch {
+      // unreadable cell — ignore
+    }
+  }
+  return false;
+}
+
+function isDrowning(bot: SafetyBot | null | undefined): boolean {
+  const oxygen = bot?.oxygenLevel;
+  if (typeof oxygen === 'number' && oxygen < DROWNING_THRESHOLD) return true;
+  const air = bot?.entity?.air;
+  if (typeof air === 'number' && air < DROWNING_THRESHOLD) return true;
+  return false;
+}
+
+/**
+ * Build a ThreatInput from the bot's live state. Only fields that are actually
+ * readable are set; everything else stays undefined (safe in estimatePDeath).
+ */
+function threatInputFromBot(bot: RiskBot | null | undefined): ThreatInput {
+  if (!bot) return {};
+  const threat: ThreatInput = {};
+  if (typeof bot.health === 'number') threat.health = bot.health;
+  const dist = nearestHostileDistance(bot);
+  if (typeof dist === 'number') threat.nearestHostileDist = dist;
+  const fireTicks = bot.fireTicks;
+  if (typeof fireTicks === 'number' && fireTicks > 0) threat.onFire = true;
+  else if (bot.entity?.onFire) threat.onFire = true;
+  const y = bot.entity?.position?.y;
+  if (typeof y === 'number' && y < VOID_Y) threat.inVoid = true;
+  if (lavaNearby(bot)) threat.lavaNearby = true;
+  if (isDrowning(bot)) threat.drowning = true;
+  return threat;
+}
+
+/**
+ * Thin wrapper: derive the bot's estimated probability of death (0..1) from its
+ * live state via the L4 risk evaluator. Defensive — returns ~0 for unknown state.
+ */
+export function botDeathProbability(bot: RiskBot | null | undefined): number {
+  return estimatePDeath(threatInputFromBot(bot));
+}
+
+/**
+ * Convenience: merge the bot-derived probability of death into a UtilityInput
+ * so the L4 risk term is explicit. Returns the input UNCHANGED when the bot is
+ * null/unknown (or the estimate is ~0), so partial/fake bots never inflate risk
+ * — backward compatible with callers that don't pass a bot.
+ */
+export function riskAdjustedInput(bot: RiskBot | null | undefined, input: UtilityInput): UtilityInput {
+  if (!bot) return input;
+  const pDeath = botDeathProbability(bot);
+  if (pDeath === 0) return input;
+  return { ...input, pDeath };
+}
+
+/**
+ * Risk-aware utility: estimate pDeath from the bot's state and feed it into
+ * utility() as an extra risk term. Lower score when the bot is in danger, so a
+ * risk-aware orchestrator never picks a suicidal option over a safe equivalent.
+ */
+export function riskAwareUtility(
+  bot: RiskBot | null | undefined,
+  input: UtilityInput,
+  w: UtilityWeights = DEFAULT_WEIGHTS
+): number {
+  return utility(riskAdjustedInput(bot, input), w);
 }

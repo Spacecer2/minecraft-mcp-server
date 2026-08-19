@@ -620,16 +620,3 @@ export function resetPrimalBrainForTest(): void {
   senseAnxietyFn = null;
   clearInterrupt();
 }
-
-/** Convenience: restart the loop against a (possibly new) bot. */
-export function restartPrimalLoop(bot: unknown, cadenceMs = 500): void {
-  stopPrimalLoop();
-  startPrimalLoop(bot, cadenceMs);
-}
-
-/**
- * Test-only / diagnostic: read the current sensor snapshot from a bot.
- */
-export function readPrimalSensors(bot: unknown): PrimalSensorInput {
-  return readSensors(bot);
-}

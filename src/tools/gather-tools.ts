@@ -7,6 +7,9 @@ import minecraftData from 'minecraft-data';
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
+import { slotValue, HIGH_VALUE_THRESHOLD, DEFAULT_ITEM_VALUE, packForTrip } from '../foraging.js';
+import { planBranchMine, shouldQuitBranch, knownGoodLevels, segmentBlocks, branchYield } from '../mining-strategy.js';
+import type { BranchMineOptions, BranchMinePlan, BlockPos } from '../mining-strategy.js';
 
 const SEARCH_DISTANCE = 24;
 const PICKUP_RANGE = 4;
@@ -126,7 +129,91 @@ function scanItemEntities(bot: mineflayer.Bot): DropEntity[] {
   return results;
 }
 
-export async function collectDrops(bot: mineflayer.Bot, pos: Vec3): Promise<number> {
+export type BranchGatherStrategy = {
+  isOre: boolean;
+  plan: BranchMinePlan | null;
+  shouldQuit: (oresFound: number, blocksMined: number) => boolean;
+};
+
+export function dropLowValueIfFull(bot: mineflayer.Bot, heldItem: string): number {
+  const inv = (bot as unknown as Record<string, unknown>).inventory as
+    | { items?: unknown; emptySlotCount?: unknown }
+    | undefined;
+  if (!inv) return 0;
+
+  const items = typeof inv.items === 'function' ? (inv.items as () => unknown)() : [];
+  if (!Array.isArray(items)) return 0;
+
+  const freeSlots =
+    typeof inv.emptySlotCount === 'function'
+      ? (inv.emptySlotCount as () => number)()
+      : Infinity;
+  if (freeSlots > 2) return 0;
+  if (slotValue(heldItem) < HIGH_VALUE_THRESHOLD) return 0;
+
+  const packed = packForTrip(
+    items.filter(
+      (it) =>
+        it &&
+        typeof it === 'object' &&
+        typeof (it as { name?: unknown }).name === 'string' &&
+        typeof (it as { count?: unknown }).count === 'number'
+    ) as Array<{ name: string; count: number }>,
+    Infinity
+  );
+  const junk = packed.dropFirst.filter((it) => slotValue(it.name) < DEFAULT_ITEM_VALUE);
+  junk.sort((a, b) => slotValue(a.name) - slotValue(b.name));
+
+  const toss = (bot as unknown as Record<string, unknown>).tossStack as
+    | ((item: unknown) => unknown)
+    | undefined;
+  const drop = (bot as unknown as Record<string, unknown>).dropStack as
+    | ((item: unknown) => unknown)
+    | undefined;
+
+  let dropped = 0;
+  for (const item of junk) {
+    if (typeof toss === 'function') {
+      try {
+        toss.call(bot, item);
+      } catch {
+        /* ignore drop failures */
+      }
+    } else if (typeof drop === 'function') {
+      try {
+        drop.call(bot, item);
+      } catch {
+        /* ignore drop failures */
+      }
+    }
+    dropped += typeof item.count === 'number' ? item.count : 1;
+  }
+  return dropped;
+}
+
+export function branchMineStrategy(
+  itemName: string,
+  origin: BlockPos,
+  opts?: BranchMineOptions
+): BranchGatherStrategy {
+  const base = itemName.toLowerCase().replace(/^(deepslate_|nether_)?(.*)_ore$/, '$2');
+  const levels = knownGoodLevels(base);
+  const isOre = levels.length > 0;
+  if (!isOre) {
+    return { isOre: false, plan: null, shouldQuit: () => false };
+  }
+  const level =
+    opts?.level ?? (levels.includes(Math.floor(origin.y)) ? Math.floor(origin.y) : levels[0]);
+  const plan = planBranchMine(origin, { ...opts, level });
+  return {
+    isOre: true,
+    plan,
+    shouldQuit: (oresFound: number, blocksMined: number) =>
+      shouldQuitBranch(oresFound, blocksMined, plan.quitWhenYieldBelow)
+  };
+}
+
+export async function collectDrops(bot: mineflayer.Bot, pos: Vec3, heldItem?: string): Promise<number> {
   let gathered = 0;
   const seen = new Set<number>();
 
@@ -167,15 +254,125 @@ export async function collectDrops(bot: mineflayer.Bot, pos: Vec3): Promise<numb
     }
   }
 
+  if (heldItem) {
+    try {
+      dropLowValueIfFull(bot, heldItem);
+    } catch (err) {
+      log('warn', `collectDrops: failed to drop low-value items to free slots: ${err}`);
+    }
+  }
+
   return gathered;
 }
 
-async function gatherItem(
+export type GatherOptions = {
+  branchMining?: boolean;
+  origin?: BlockPos;
+};
+
+export type GatherResult = {
+  have: number;
+  dug: number;
+  beforeCount: number;
+  quitBranch: boolean;
+  oresFound: number;
+  blocksMined: number;
+};
+
+async function digPlannedSegments(
   bot: mineflayer.Bot,
   itemName: string,
   target: number,
-  maxAttempts: number
-): Promise<{ have: number; dug: number; beforeCount: number }> {
+  strategy: BranchGatherStrategy
+): Promise<{ dug: number; have: number; oresFound: number; blocksMined: number; quitBranch: boolean }> {
+  const plan = strategy.plan;
+  if (plan === null) {
+    return { dug: 0, have: countItemInInventory(bot, itemName), oresFound: 0, blocksMined: 0, quitBranch: false };
+  }
+
+  let oresFound = 0;
+  let blocksMined = 0;
+  let quitBranch = false;
+  let dug = 0;
+  let have = countItemInInventory(bot, itemName);
+
+  for (const seg of plan.order) {
+    if (quitBranch || have >= target) break;
+    const segStart = Date.now();
+    const segOresStart = oresFound;
+    const segBlocksStart = blocksMined;
+
+    for (const pos of segmentBlocks(seg)) {
+      if (quitBranch || have >= target) break;
+      const blockPos = new Vec3(pos.x, pos.y, pos.z);
+
+      try {
+        await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
+      } catch (err) {
+        log('warn', `[MVT] could not reach (${pos.x}, ${pos.y}, ${pos.z}): ${err}`);
+        continue;
+      }
+
+      let block: Block | null = null;
+      try {
+        block = bot.blockAt(blockPos);
+      } catch (err) {
+        log('warn', `[MVT] blockAt failed at (${pos.x}, ${pos.y}, ${pos.z}): ${err}`);
+        continue;
+      }
+      if (!block) continue;
+
+      try {
+        await bot.dig(block);
+        dug += 1;
+        blocksMined += 1;
+      } catch (err) {
+        log('warn', `[MVT] failed to dig ${block.name} at (${pos.x}, ${pos.y}, ${pos.z}): ${err}`);
+        continue;
+      }
+
+      const beforePickup = countItemInInventory(bot, itemName);
+      try {
+        await collectDrops(bot, blockPos, itemName);
+      } catch (err) {
+        log('warn', `[MVT] failed to collect drops at (${pos.x}, ${pos.y}, ${pos.z}) for ${itemName}: ${err}`);
+      }
+      have = countItemInInventory(bot, itemName);
+      if (have <= beforePickup) {
+        try {
+          await collectDrops(bot, blockPos, itemName);
+        } catch (err) {
+          log('warn', `[MVT] retry collecting drops at (${pos.x}, ${pos.y}, ${pos.z}) for ${itemName}: ${err}`);
+        }
+        have = countItemInInventory(bot, itemName);
+      }
+      if (have > beforePickup) oresFound += 1;
+
+      if (strategy.shouldQuit(oresFound, blocksMined)) {
+        log('warn', `[MVT] ore yield dropped below environment average — quit this branch`);
+        quitBranch = true;
+        break;
+      }
+    }
+
+    const segTime = (Date.now() - segStart) / 1000;
+    const segOres = oresFound - segOresStart;
+    const segBlocks = blocksMined - segBlocksStart;
+    const yieldPerMin = branchYield(segOres, segBlocks, segTime);
+    const rendered = Number.isFinite(yieldPerMin) ? yieldPerMin.toFixed(1) : '∞';
+    log('warn', `[MVT] segment ${seg.kind} yielded ${segOres} ore in ${segBlocks} blocks (${rendered} ore/min)`);
+  }
+
+  return { dug, have, oresFound, blocksMined, quitBranch };
+}
+
+export async function gatherItem(
+  bot: mineflayer.Bot,
+  itemName: string,
+  target: number,
+  maxAttempts: number,
+  opts: GatherOptions = {}
+): Promise<GatherResult> {
   const mcData = minecraftData(bot.version);
   const sourceIds: number[] = [];
   for (const name of SOURCE_BLOCKS[itemName]) {
@@ -185,7 +382,28 @@ async function gatherItem(
     }
   }
 
+  const strategy = branchMineStrategy(itemName, opts.origin ?? bot.entity.position);
   const beforeCount = countItemInInventory(bot, itemName);
+
+  if (opts.branchMining === true && strategy.isOre && strategy.plan !== null) {
+    const plan = strategy.plan;
+    let moved = false;
+    try {
+      await bot.pathfinder.goto(new goals.GoalNear(plan.origin.x, plan.level, plan.origin.z, 2));
+      moved = true;
+    } catch (err) {
+      log('warn', `[MVT] could not reach mining level ${plan.level}: ${err}`);
+    }
+    if (moved) {
+      const result = await digPlannedSegments(bot, itemName, target, strategy);
+      return { ...result, beforeCount };
+    }
+  }
+
+  const branchMining = opts.branchMining === true && strategy.isOre;
+  let oresFound = 0;
+  let blocksMined = 0;
+  let quitBranch = false;
   let have = beforeCount;
   let dug = 0;
 
@@ -224,7 +442,7 @@ async function gatherItem(
 
     const beforePickup = countItemInInventory(bot, itemName);
     try {
-      await collectDrops(bot, pos);
+      await collectDrops(bot, pos, itemName);
     } catch (err) {
       log('warn', `Failed to collect drops near (${pos.x}, ${pos.y}, ${pos.z}) for ${itemName}: ${err}`);
     }
@@ -232,15 +450,25 @@ async function gatherItem(
 
     if (have <= beforePickup) {
       try {
-        await collectDrops(bot, pos);
+        await collectDrops(bot, pos, itemName);
       } catch (err) {
         log('warn', `Retry collecting drops near (${pos.x}, ${pos.y}, ${pos.z}) for ${itemName}: ${err}`);
       }
       have = countItemInInventory(bot, itemName);
     }
+
+    if (branchMining) {
+      blocksMined += 1;
+      if (have > beforePickup) oresFound += 1;
+      if (strategy.shouldQuit(oresFound, blocksMined)) {
+        log('warn', `[MVT] ore yield dropped below environment average — quit this branch`);
+        quitBranch = true;
+        break;
+      }
+    }
   }
 
-  return { have, dug, beforeCount };
+  return { have, dug, beforeCount, quitBranch, oresFound, blocksMined };
 }
 
 export function registerGatherTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
@@ -275,17 +503,22 @@ export function registerGatherTools(factory: ToolFactory, getBot: () => mineflay
     {
       itemName: z.string().describe("Name of the item to gather (e.g. wood, cobblestone, coal, iron)"),
       count: z.coerce.number().int().positive().optional().describe("How many to gather (default: 16)"),
-      maxAttempts: z.coerce.number().int().positive().optional().describe("Max find/dig attempts (default: 20)")
+      maxAttempts: z.coerce.number().int().positive().optional().describe("Max find/dig attempts (default: 20)"),
+      branchMining: z.boolean().optional().describe("For ore, stop a branch when yield drops below the environment average")
     },
-    async ({ itemName, count = 16, maxAttempts = 20 }: { itemName: string; count?: number; maxAttempts?: number }) => {
+    async ({ itemName, count = 16, maxAttempts = 20, branchMining = false }: { itemName: string; count?: number; maxAttempts?: number; branchMining?: boolean }) => {
       const item = itemName.trim().toLowerCase();
       if (!SOURCE_BLOCKS[item]) {
         return factory.createErrorResponse(`No known source block for ${item}.`);
       }
 
       const bot = getBot();
-      const { have, beforeCount } = await gatherItem(bot, item, count, maxAttempts);
+      const { have, beforeCount, quitBranch } = await gatherItem(bot, item, count, maxAttempts, { branchMining });
       addToLedger(item, Math.max(0, have - beforeCount));
+
+      if (quitBranch) {
+        return factory.createResponse(`Gathered ${have}/${count} ${item} — stopped this branch early (ore yield below average).`);
+      }
 
       return factory.createResponse(`Gathered ${have}/${count} ${item}.`);
     }

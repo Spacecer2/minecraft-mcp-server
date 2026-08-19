@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { log } from './logger.js';
 import { parseConfig } from './config.js';
+import { setupStdioFiltering } from './stdio-filter.js';
 import { BotManager, generateBotName } from './bot-manager.js';
 import { botContext } from './bot-context.js';
 import { ToolFactory } from './tool-factory.js';
@@ -39,6 +40,7 @@ import { registerFarmingTools } from './tools/farming-tools.js';
 import { registerMotionTools } from './tools/motion-tools.js';
 import { registerVisionTools } from './tools/vision-tools.js';
 import { registerWatchdogTools } from './tools/watchdog-tools.js';
+import { registerArchitectTools } from './tools/architect-tools.js';
 import { watchdog } from './watchdog.js';
 import { setArousalSensor } from './primal-brain.js';
 import { senseAnxiety, arousal } from './arousal.js';
@@ -258,12 +260,22 @@ async function main() {
   registerMotionTools(factory, getBot);
   registerVisionTools(factory, getBot);
   registerWatchdogTools(factory, getBot);
+  registerArchitectTools(factory, getBot);
 
   process.stdin.on('end', () => {
     manager.cleanup();
     log('info', 'MCP Client has disconnected. Shutting down...');
     process.exit(0);
   });
+
+  // Install the stdio filter BEFORE the StdioServerTransport is established so
+  // bot console noise can never corrupt the JSON-RPC protocol on stdout.
+  // Best-effort: a failure to install must never crash server startup.
+  try {
+    setupStdioFiltering();
+  } catch (err) {
+    log('warn', `Failed to install stdio filter: ${err}`);
+  }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

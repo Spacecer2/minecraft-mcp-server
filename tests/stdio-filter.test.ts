@@ -54,3 +54,43 @@ test('does not replace console.error', (t) => {
 
   t.is(console.error, originalError);
 });
+
+test('setupStdioFiltering is idempotent (second call does not double-wrap)', (t) => {
+  const originalLog = console.log;
+  const originalInfo = console.info;
+  const originalDebug = console.debug;
+
+  t.notThrows(() => setupStdioFiltering());
+  const wrappedLog = console.log;
+  const wrappedInfo = console.info;
+  const wrappedDebug = console.debug;
+
+  // Calling again must not throw and must leave the installed functions in
+  // place — never re-wrapping what is already installed.
+  t.notThrows(() => setupStdioFiltering());
+  t.is(console.log, wrappedLog);
+  t.is(console.info, wrappedInfo);
+  t.is(console.debug, wrappedDebug);
+
+  console.log = originalLog;
+  console.info = originalInfo;
+  console.debug = originalDebug;
+});
+
+test('setupStdioFiltering returns without throwing in a benign environment', (t) => {
+  const originalLog = console.log;
+  const originalInfo = console.info;
+  const originalDebug = console.debug;
+  const originalStdoutWrite = process.stdout.write;
+  const originalError = console.error;
+
+  t.notThrows(() => setupStdioFiltering());
+
+  // The transport-facing stream and error channel are never touched.
+  t.is(process.stdout.write, originalStdoutWrite);
+  t.is(console.error, originalError);
+
+  console.log = originalLog;
+  console.info = originalInfo;
+  console.debug = originalDebug;
+});

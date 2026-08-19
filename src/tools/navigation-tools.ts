@@ -4,6 +4,11 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { ToolFactory } from '../tool-factory.js';
 import { checkInterrupt } from '../interrupt.js';
+import {
+  returnVector,
+  tripBudget,
+  type Position
+} from '../dead-reckoning.js';
 
 type Waypoint = { x: number; y: number; z: number };
 type Heading = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
@@ -208,6 +213,39 @@ export function registerNavigationTools(factory: ToolFactory, getBot: () => mine
       }
       const lines = Array.from(waypoints.entries()).map(([name, wp]) => `${name}: (${wp.x}, ${wp.y}, ${wp.z})`);
       return factory.createResponse(lines.join('\n'));
+    }
+  );
+
+  factory.registerTool(
+    "trip-check",
+    "Dead-reckoning check before a long trip: budgets the return against a deadline and reports the return vector home",
+    {
+      x: z.coerce.number().optional().describe("Target X coordinate (defaults to the bot's current position)"),
+      y: z.coerce.number().optional().describe("Target Y coordinate (defaults to the bot's current position)"),
+      z: z.coerce.number().optional().describe("Target Z coordinate (defaults to the bot's current position)"),
+      distancePerMinute: z.coerce.number().optional().describe("Travel speed in blocks per minute (default: 20)"),
+      returnDeadlineMinutes: z.coerce.number().optional().describe("Minutes until the return deadline (default: 30)")
+    },
+    async ({ x, y, z, distancePerMinute, returnDeadlineMinutes }: {
+      x?: number; y?: number; z?: number; distancePerMinute?: number; returnDeadlineMinutes?: number;
+    }) => {
+      const bot = getBot();
+      const pos = bot.entity?.position;
+      if (!pos) {
+        return factory.createErrorResponse("No position available");
+      }
+      const botPos: Position = { x: pos.x, y: pos.y, z: pos.z };
+      const targetPos: Position = { x: x ?? pos.x, y: y ?? pos.y, z: z ?? pos.z };
+      const rv = returnVector(botPos, targetPos);
+      const deadline = Date.now() + (returnDeadlineMinutes ?? 30) * 60000;
+      const budget = tripBudget(botPos, targetPos, distancePerMinute ?? 20, deadline);
+      return factory.createResponse(JSON.stringify({
+        feasible: budget.feasible,
+        remainingTime: budget.remainingTime,
+        returnDistance: budget.returnDistance,
+        maxSafeOutreach: budget.maxSafeOutreach,
+        returnVector: rv
+      }));
     }
   );
 }

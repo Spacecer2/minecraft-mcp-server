@@ -60,23 +60,6 @@ export function senseAnxiety(input: {
   return clamp01(anxiety);
 }
 
-/**
- * Sense boredom (0..1) from the agent's recent activity (top-down).
- * Boredom rises with many identical chained steps or a long time since a
- * meaningful event, and collapses when something new was recently seen.
- */
-export function senseBoredom(input: {
-  stepsSinceNovelty?: number; // identical steps chained
-  secondsSinceNovelty?: number; // time since a novel/meaningful event
-  sawNewThingRecently?: boolean;
-}): number {
-  const bySteps = clamp01((input.stepsSinceNovelty ?? 0) / 20); // 20 identical steps -> bored
-  const byTime = clamp01((input.secondsSinceNovelty ?? 0) / 600); // 10 min quiet -> bored
-  let boredom = Math.max(bySteps, byTime);
-  if (input.sawNewThingRecently) boredom *= 0.2; // novelty just seen pulls boredom down
-  return clamp01(boredom);
-}
-
 // ---------------------------------------------------------------------------
 // Global arousal singleton (module-level mutable state)
 // ---------------------------------------------------------------------------
@@ -106,14 +89,6 @@ export const arousal = {
 // ---------------------------------------------------------------------------
 // Weight modulation
 // ---------------------------------------------------------------------------
-
-/**
- * The effective value bonus the agent gives to novel/exploratory options.
- * Exposed as boredom itself — higher boredom means the agent values novelty more.
- */
-export function noveltyBias(): number {
-  return state.boredom;
-}
 
 /**
  * THE KEY FUNCTION: modulate the utility weights from the current arousal.

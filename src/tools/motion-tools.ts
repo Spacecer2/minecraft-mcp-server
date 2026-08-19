@@ -5,6 +5,8 @@ const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { checkInterrupt, isInterruptError, getInterruptReason } from '../interrupt.js';
+import { cushionState } from './combat-tools.js';
+import { resourceCushionOK } from '../fallback.js';
 
 type Waypoint = { x: number; y: number; z: number };
 type Condition = 'night' | 'day' | 'hungry' | 'full-health' | 'low-health' | 'not-sleeping';
@@ -30,6 +32,24 @@ const CONDITIONS: Record<Condition, (bot: mineflayer.Bot) => boolean> = {
 };
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Additive, non-blocking cushion warning surfaced when the safe path crosses
+ * water. Warns about swim (and related mining) resource cushions when they are
+ * not met, without vetoing the path itself.
+ */
+function swimCushionWarning(bot: mineflayer.Bot): string | null {
+  const state = cushionState(bot);
+  const notes: string[] = [];
+  if (!resourceCushionOK(state, 'swim')) {
+    notes.push('swim cushion not met (low HP/food for swimming)');
+  }
+  if (!resourceCushionOK(state, 'mine')) {
+    notes.push('mining cushion not met along route');
+  }
+  if (notes.length === 0) return null;
+  return `Cushion note: crossing water — ${notes.join('; ')}.`;
+}
 
 async function gotoLeg(
   bot: mineflayer.Bot,
@@ -98,6 +118,7 @@ export function registerMotionTools(factory: ToolFactory, getBot: () => mineflay
 
       const waypoints: Waypoint[] = [];
       let hazardFound = false;
+      let waterCrossed = false;
 
       for (let i = 1; i <= intervals && waypoints.length < 20; i++) {
         const t = Math.min(1, (i * safeStep) / total);
@@ -112,6 +133,9 @@ export function registerMotionTools(factory: ToolFactory, getBot: () => mineflay
 
         if (HAZARDS.has(groundName) || HAZARDS.has(blockName)) {
           hazardFound = true;
+          if (groundName === 'water' || groundName === 'flowing_water' || blockName === 'water' || blockName === 'flowing_water') {
+            waterCrossed = true;
+          }
           waypoints.push({ x: bx + safeStep, y: by, z: bz });
           waypoints.push({ x: bx + safeStep, y: by, z: bz + safeStep });
         } else {
@@ -119,16 +143,23 @@ export function registerMotionTools(factory: ToolFactory, getBot: () => mineflay
         }
       }
 
+      const cushionWarning = waterCrossed
+        ? swimCushionWarning(bot)
+        : null;
+
       if (!hazardFound) {
-        return factory.createResponse("Direct path is clear (no hazards detected).");
+        return factory.createResponse(
+          cushionWarning
+            ? `Direct path is clear (no hazards detected).\n${cushionWarning}`
+            : "Direct path is clear (no hazards detected)."
+        );
       }
 
       const lines = waypoints.map(
         (wp, idx) => `${idx + 1}. (${Math.floor(wp.x)}, ${Math.floor(wp.y)}, ${Math.floor(wp.z)})`
       );
-      return factory.createResponse(
-        `Safe path to (${Math.floor(x)}, ${Math.floor(y)}, ${Math.floor(z)}): ${waypoints.length} waypoint(s):\n${lines.join('\n')}`
-      );
+      const base = `Safe path to (${Math.floor(x)}, ${Math.floor(y)}, ${Math.floor(z)}): ${waypoints.length} waypoint(s):\n${lines.join('\n')}`;
+      return factory.createResponse(cushionWarning ? `${base}\n${cushionWarning}` : base);
     }
   );
 

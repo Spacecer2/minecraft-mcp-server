@@ -27,27 +27,26 @@ import {
 } from './interrupt.js';
 import { isHostileEntity, iterateEntities, distanceToEntity } from './tools/entity-tools.js';
 import { startPrimalLoop, stopPrimalLoop } from './primal-brain.js';
+import { duskPreemptActive } from './drives.js';
+import {
+  recordDeath,
+  persist,
+  type MemoryLike,
+  type DeathEntry,
+  type DeathCause
+} from './death-register.js';
 
 export const EVENT_NAMES = [
   'hostile', 'creeper', 'fall', 'void', 'lava', 'low-health', 'hunger',
-  'on-fire', 'night', 'drowning', 'inventory-full', 'chat'
+  'on-fire', 'night', 'dusk', 'drowning', 'inventory-full', 'chat'
 ] as const;
 
 export type WatchdogEvent = (typeof EVENT_NAMES)[number];
 
-/**
- * Events that are triggered purely by mineflayer listeners, NOT the polled
- * tick loop. `death` and `reorient` have no polled equivalent — they only fire
- * when their bot event fires. `chat` is handled by the background chat
- * listener. Each handler guards on `enabledEvents`, so these events only
- * preempt when explicitly enabled.
- */
-export const EVENT_DRIVEN_EVENT_NAMES = ['death', 'reorient', 'chat'] as const;
-
 /** Events are evaluated in this priority order; the first that fires wins this tick. */
 const EVENT_PRIORITY: WatchdogEvent[] = [
   'void', 'on-fire', 'creeper', 'fall', 'drowning', 'lava', 'hostile',
-  'low-health', 'hunger', 'night', 'inventory-full'
+  'low-health', 'hunger', 'dusk', 'night', 'inventory-full'
 ];
 
 /**
@@ -67,6 +66,7 @@ const EVENT_MODES: Record<string, string> = {
   hunger: 'eat',
   'on-fire': 'fire-emergency',
   night: 'sleep',
+  dusk: 'secure-perimeter',
   drowning: 'surface',
   'inventory-full': 'inventory',
   chat: 'listen',
@@ -94,6 +94,7 @@ export const PRIORITY_BY_EVENT: Record<string, InterruptPriority> = {
   reorient: InterruptPriority.P1,
   chat: InterruptPriority.P1,
   night: InterruptPriority.P3,
+  dusk: InterruptPriority.P3,
   'inventory-full': InterruptPriority.P3
 };
 
@@ -269,8 +270,12 @@ export class Watchdog {
 
   startWatchdog(opts: WatchdogStartOptions = {}): void {
     this.clearTimer();
+    // 'dusk' is an opt-in anticipatory event: it preempts BEFORE nightfall, so
+    // it is excluded from the default-all set to preserve prior behavior. Call
+    // enableEvent('dusk') (or pass events:['dusk', ...]) to turn it on.
+    const defaultEvents = EVENT_NAMES.filter((e) => e !== 'dusk');
     this.enabledEvents = new Set<string>(
-      opts.events && opts.events.length > 0 ? opts.events : EVENT_NAMES
+      opts.events && opts.events.length > 0 ? opts.events : defaultEvents
     );
     if (opts.thresholds) {
       this.thresholds = { ...this.thresholds, ...opts.thresholds };
@@ -334,6 +339,22 @@ export class Watchdog {
   }
 
   /**
+   * Record the bot's death into the death register from live bot state, then
+   * fire-and-forget the persistence write. Fully best-effort: any failure here
+   * is swallowed so the death handling / respawn flow always proceeds.
+   */
+  private recordDeathForBot(): void {
+    try {
+      if (this.bot) {
+        recordBotDeath(this.bot);
+        void persist(this.bot as unknown as MemoryLike).catch(() => {});
+      }
+    } catch {
+      // a recording failure must never break death handling/respawn
+    }
+  }
+
+  /**
    * Attach mineflayer event listeners that preempt the agent the INSTANT the
    * event fires — no polling latency. These run in parallel with the polled
    * tick loop (which remains the fallback for events with no listener: lava,
@@ -352,6 +373,9 @@ export class Watchdog {
       death: () => {
         if (!canPreempt(this.priorityFor('death'))) return;
         if (!this.enabledEvents.has('death')) return;
+        // Record the death into the death register (fire-and-forget persist).
+        // Best-effort: a recording failure must never break death handling/respawn.
+        this.recordDeathForBot();
         this.trigger(
           'death',
           'DIED — CANCEL current action; auto-respawning, then resume if possible. Report the death.'
@@ -692,6 +716,15 @@ export class Watchdog {
           if (fire <= 0) return null;
           return { directive: 'ON FIRE — CANCEL; douse/retreat.' };
         }
+        case 'dusk': {
+          const timeOfDay = bot.time?.timeOfDay;
+          if (typeof timeOfDay !== 'number' || !duskPreemptActive(timeOfDay)) return null;
+          if (bot.isSleeping) return null;
+          if (this.isIndoors(bot)) return null;
+          return {
+            directive: `dusk approaching — CANCEL outdoor work; secure-perimeter: return to base, light torches, fortify before nightfall.`
+          };
+        }
         case 'night': {
           const timeOfDay = bot.time?.timeOfDay;
           if (typeof timeOfDay !== 'number' || timeOfDay < this.threshold('nightTime', 13000)) {
@@ -770,6 +803,113 @@ export class Watchdog {
 }
 
 export const watchdog = new Watchdog();
+
+/** Format a bot's position as a readable location key (or 'unknown'). */
+function deathLocation(bot: unknown): string {
+  try {
+    const pos = (bot as { entity?: { position?: { x: number; y: number; z: number } } })
+      .entity?.position;
+    if (!pos) return 'unknown';
+    return `(${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)})`;
+  } catch {
+    return 'unknown';
+  }
+}
+
+function deathHp(bot: unknown): number {
+  const health = (bot as { health?: unknown }).health;
+  return typeof health === 'number' && Number.isFinite(health) ? health : 0;
+}
+
+/** Count nearby hostile mobs (and whether any is a creeper). Best-effort. */
+function nearbyThreats(
+  bot: unknown,
+  radius = 8
+): { hostiles: number; creeper: boolean } {
+  const result = { hostiles: 0, creeper: false };
+  try {
+    const b = bot as {
+      entity?: { id?: number; position?: { x: number; y: number; z: number } };
+    };
+    const origin = b?.entity?.position;
+    const selfId = b?.entity?.id;
+    if (!origin) return result;
+    for (const record of iterateEntities(bot as Bot)) {
+      const entity = record.entity;
+      if (!entity) continue;
+      if (selfId !== undefined && entity.id === selfId) continue;
+      if (!entity.position) continue;
+      const dx = origin.x - entity.position.x;
+      const dy = origin.y - entity.position.y;
+      const dz = origin.z - entity.position.z;
+      if (Math.sqrt(dx * dx + dy * dy + dz * dz) > radius) continue;
+      if (entity.name === 'creeper') result.creeper = true;
+      if (isHostileEntity(entity)) result.hostiles++;
+    }
+  } catch {
+    // best-effort
+  }
+  return result;
+}
+
+/**
+ * Infer a likely death cause from the bot's terminal state, else 'unknown'.
+ * Best-effort and never throws.
+ */
+function inferDeathCause(bot: unknown): DeathCause | 'unknown' {
+  try {
+    const b = bot as {
+      entity?: {
+        position?: { y?: number };
+        velocity?: { y?: number };
+        fireTicks?: number;
+        flameTicks?: number;
+        onFire?: boolean;
+      };
+      oxygenLevel?: number;
+      food?: number;
+    };
+    const y = b?.entity?.position?.y;
+    if (typeof y === 'number' && y < -60) return 'void';
+    const fire =
+      (typeof b?.entity?.fireTicks === 'number' ? b.entity.fireTicks : 0) +
+      (typeof b?.entity?.flameTicks === 'number' ? b.entity.flameTicks : 0);
+    if (fire > 0 || b?.entity?.onFire) return 'fire';
+    const velY = b?.entity?.velocity?.y;
+    if (typeof velY === 'number' && velY < -3) return 'fall';
+    if (typeof b?.oxygenLevel === 'number' && b.oxygenLevel < 10) return 'drowning';
+    if (typeof b?.food === 'number' && b.food <= 0) return 'starvation';
+    const threats = nearbyThreats(bot, 8);
+    if (threats.creeper) return 'creeper';
+    if (threats.hostiles > 0) return 'hostile';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Record the bot's death into the death register from live bot state.
+ * Defensive: returns null (and never throws) when the state is unusable.
+ * `action` reflects the watchdog's current mode at death time.
+ */
+export function recordBotDeath(bot: unknown, cause?: string): DeathEntry | null {
+  try {
+    if (!bot) return null;
+    const threats = nearbyThreats(bot, 8);
+    const entry: DeathEntry = {
+      location: deathLocation(bot),
+      cause: cause || inferDeathCause(bot) || 'unknown',
+      hpAtDeath: deathHp(bot),
+      nearbyThreats: threats.hostiles,
+      action: watchdog.mode || 'unknown',
+      timestamp: Date.now()
+    };
+    return recordDeath(entry);
+  } catch {
+    return null;
+  }
+}
 
 /** Reset all watchdog state (timer, mode, triggers, bot ref, interrupt) for test isolation. */
 export function resetWatchdogForTest(): void {

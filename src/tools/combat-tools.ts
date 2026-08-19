@@ -5,8 +5,50 @@ const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { entityHealth, entityName, isHostileEntity } from './entity-tools.js';
+import {
+  DEFAULT_CUSHION,
+  resourceCushionOK,
+  type ResourceState,
+  type RiskyOperation
+} from '../fallback.js';
 
 type Entity = NonNullable<ReturnType<mineflayer.Bot['nearestEntity']>>;
+
+/**
+ * Build a defensive ResourceState from a bot's live vitals. Unknown values are
+ * left undefined so resourceCushionOK treats them as pass-through (never veto).
+ */
+export function cushionState(bot: mineflayer.Bot): ResourceState {
+  const state: ResourceState = {};
+  if (typeof bot.health === 'number') state.health = bot.health;
+  if (typeof bot.food === 'number') state.food = bot.food;
+  if (typeof bot.heldItem?.durabilityUsed === 'number' && typeof bot.heldItem?.maxDurability === 'number' && bot.heldItem.maxDurability > 0) {
+    state.toolDurabilityPercent = Math.max(
+      0,
+      Math.min(100, (100 * (bot.heldItem.maxDurability - bot.heldItem.durabilityUsed)) / bot.heldItem.maxDurability)
+    );
+  }
+  return state;
+}
+
+/**
+ * Decide whether a bot may run a risky operation under the resource cushion.
+ * Defensive: unknown state (fake bot, no vitals) is allowed.
+ */
+export function canRunOperation(
+  bot: mineflayer.Bot,
+  operation: RiskyOperation
+): { ok: boolean; reason?: string } {
+  const state = cushionState(bot);
+  if (resourceCushionOK(state, operation)) {
+    return { ok: true };
+  }
+  const t = DEFAULT_CUSHION[operation] ?? DEFAULT_CUSHION.generic;
+  return {
+    ok: false,
+    reason: `${operation} requires HP>=${t.health}`
+  };
+}
 
 const MATERIAL_RANK: Record<string, number> = {
   wooden: 1,
@@ -105,6 +147,13 @@ export function registerCombatTools(factory: ToolFactory, getBot: () => mineflay
         bot.entity.position.distanceTo(entity.position) > maxDistance
       ) {
         return factory.createResponse(`No ${label} within ${maxDistance} blocks.`);
+      }
+
+      const cushion = canRunOperation(bot, 'combat');
+      if (!cushion.ok) {
+        return factory.createErrorResponse(
+          `Refusing to engage: resource cushion not met (combat requires HP>=${DEFAULT_CUSHION.combat.health}). Consider flee instead.`
+        );
       }
 
       const weapon = findBestWeapon(bot);

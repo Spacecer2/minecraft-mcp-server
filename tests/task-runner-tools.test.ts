@@ -3,7 +3,7 @@ import sinon from 'sinon';
 import minecraftData from 'minecraft-data';
 import { registerTaskRunnerTools, resetTaskRuns } from '../src/tools/task-runner-tools.js';
 import { statusOf } from '../src/goal-runner.js';
-import { ToolFactory } from '../src/tool-factory.js';
+import { ToolFactory, makePrimalDispatcher } from '../src/tool-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { BotConnection } from '../src/bot-connection.js';
 import type mineflayer from 'mineflayer';
@@ -624,4 +624,57 @@ test.serial('run-goal chest routes to chest withdraw', async (t) => {
   const st = await status({});
   t.false(!!st.isError);
   t.true(st.content[0].text.includes('Progress: withdrew wheat'));
+});
+
+test.serial('run-goal gather routes through a registered hidden collect-item tool via the primal dispatcher', async (t) => {
+  const gather = makeGatherBot(32);
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = {
+    checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
+  } as unknown as BotConnection;
+  const mockManager = {
+    getPrimaryName: sinon.stub().returns('primary'),
+    getConnection: sinon.stub().returns(mockConnection)
+  };
+  const factory = new ToolFactory(mockServer, mockManager);
+
+  // Register a hidden 'primal' collect-item executor. When the gather goal step
+  // dispatches through callPrimal (via makePrimalDispatcher), THIS executor runs
+  // instead of the direct bot.dig path — proving the hidden tool is live.
+  const collectItemExecutor = sinon.stub().callsFake(async () => {
+    await (gather.bot.dig as sinon.SinonStub)();
+    return { content: [{ type: 'text', text: 'Collected via primal collect-item' }] };
+  });
+  factory.registerTool('collect-item', 'Hidden', {}, collectItemExecutor, { visibility: 'primal' });
+
+  registerTaskRunnerTools(factory, () => gather.bot as mineflayer.Bot);
+  resetTaskRuns();
+
+  const getExecutor = (name: string): Executor => {
+    const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
+    const call = toolCalls.find((c) => c.args[0] === name);
+    return call!.args[3] as Executor;
+  };
+
+  const runGoal = getExecutor('run-goal');
+  const status = getExecutor('run-task-status');
+
+  const result = await runGoal({ goal: 'collect 32 wood', autoAdvanceMs: 5 });
+  t.false(!!result.isError);
+
+  await waitForGoal(() => statusOf()?.status === 'done');
+
+  // The gather action was routed through the hidden primal tool, not bot.dig directly.
+  t.true(collectItemExecutor.calledOnce);
+  t.deepEqual(collectItemExecutor.firstCall.args[0], { itemName: 'wood', count: 32, maxAttempts: 20 });
+
+  const st = await status({});
+  t.false(!!st.isError);
+  t.true(st.content[0].text.includes('Gather goal complete: have 32/32 wood'));
+
+  // makePrimalDispatcher is the production seam and must dispatch the same way.
+  const dispatch = makePrimalDispatcher(factory);
+  const d = await dispatch('collect-item', { itemName: 'wood', count: 1 });
+  t.true(d.ok);
+  t.is(d.text, 'Collected via primal collect-item');
 });

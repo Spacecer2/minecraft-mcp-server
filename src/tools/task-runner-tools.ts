@@ -5,11 +5,33 @@ const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import { Block } from 'prismarine-block';
 import minecraftData from 'minecraft-data';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type PrimalDispatch, makePrimalDispatcher } from '../tool-factory.js';
 import { checkInterrupt, isInterruptError, getInterruptReason } from '../interrupt.js';
 import { GoalContext, GoalStep, GoalStepResult, GoalSpec, WeightedFallback, pickBestFallback } from '../goal-core.js';
+import {
+  type DriveInput,
+  type DriveDecision,
+  healthDrive,
+  hungerDrive,
+  oxygenDrive,
+  nightDrive,
+  threatDrive,
+  inventoryDrive,
+  toolDrive,
+  arbitrate,
+  duskPreemptActive
+} from '../drives.js';
+import {
+  type DayPhase,
+  phaseFor,
+  suggestedActivities,
+  returnByDuskDeadline
+} from '../day-rhythm.js';
 import { startGoalRun, statusOf, resolveRun, abortRun, resetGoalRuns, type GoalTask } from '../goal-runner.js';
 import { estimateDistance, estimateRiskNearby, safeInput } from '../utility.js';
+import { planBranchMine, knownGoodLevels, DEFAULT_BRANCH_SPACING } from '../mining-strategy.js';
+import type { BranchMinePlan, BlockPos } from '../mining-strategy.js';
+import { ucbBonus } from '../risk-evaluator.js';
 import * as gatherTools from './gather-tools.js';
 import {
   generateTemplate,
@@ -60,6 +82,14 @@ const SOURCE_BLOCKS: Record<string, string[]> = {
   redstone: ['redstone_ore', 'deepslate_redstone_ore'],
   lapis_lazuli: ['lapis_ore', 'deepslate_lapis_ore'],
   emerald: ['emerald_ore', 'deepslate_emerald_ore'],
+  coal_ore: ['coal_ore', 'deepslate_coal_ore'],
+  iron_ore: ['iron_ore', 'deepslate_iron_ore'],
+  gold_ore: ['gold_ore', 'deepslate_gold_ore'],
+  copper_ore: ['copper_ore', 'deepslate_copper_ore'],
+  diamond_ore: ['diamond_ore', 'deepslate_diamond_ore'],
+  redstone_ore: ['redstone_ore', 'deepslate_redstone_ore'],
+  lapis_ore: ['lapis_ore', 'deepslate_lapis_ore'],
+  emerald_ore: ['emerald_ore', 'deepslate_emerald_ore'],
   dirt: ['dirt', 'grass_block'],
   sand: ['sand'],
   gravel: ['gravel'],
@@ -106,6 +136,11 @@ interface TaskRun {
 
 const taskRuns = new Map<number, TaskRun>();
 let lastTaskId = 0;
+
+// Module-level UCB exploration bookkeeping for goal planning: tracks how many
+// times each gather/harvest goal has been planned so the exploration bonus can
+// decay as a goal becomes familiar.
+const goalVisitCounts = new Map<string, number>();
 
 export function resetTaskRuns(): void {
   taskRuns.clear();
@@ -999,7 +1034,7 @@ export function openChestStep(itemName: string, count: number): GoalStep {
 }
 
 /** Reuse the existing gatherItem primitive as a goal step with a tracked task-run. */
-export function gatherItemStep(itemName: string, count: number): GoalStep {
+export function gatherItemStep(itemName: string, count: number, opts?: { dispatch?: PrimalDispatch }): GoalStep {
   return {
     name: 'gatherItem',
     run: async (ctx: GoalContext): Promise<GoalStepResult> => {
@@ -1017,7 +1052,23 @@ export function gatherItemStep(itemName: string, count: number): GoalStep {
 
       let have = 0;
       try {
-        have = await gatherItem(bot, itemName, count, GATHER_ATTEMPTS);
+        // When a primal dispatcher is available, route the low-level gather
+        // action through the hidden 'collect-item' tool (which invokes the
+        // registered executor via callPrimal) rather than driving the bot
+        // directly. If the hidden tool is not registered on the factory (e.g.
+        // in a minimal test harness), the dispatch reports ok:false and we
+        // fall back to the direct-bot path so behavior stays backward
+        // compatible.
+        if (opts?.dispatch) {
+          const result = await opts.dispatch('collect-item', { itemName, count, maxAttempts: GATHER_ATTEMPTS });
+          if (result.ok) {
+            have = countItemInInventory(bot, itemName);
+          } else {
+            have = await gatherItem(bot, itemName, count, GATHER_ATTEMPTS);
+          }
+        } else {
+          have = await gatherItem(bot, itemName, count, GATHER_ATTEMPTS);
+        }
       } catch (err) {
         const run = taskRuns.get(id);
         if (run) {
@@ -1124,6 +1175,122 @@ export function buildStep(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// L1 Homeostasis: day-phase & drive-aware goal planning (back brain)
+// ---------------------------------------------------------------------------
+
+/** Read the bot's time-of-day (0..24000 ticks), or undefined when unavailable. */
+function readTimeOfDay(bot: mineflayer.Bot): number | undefined {
+  try {
+    const tod = (bot as { time?: { timeOfDay?: number } }).time?.timeOfDay;
+    return typeof tod === 'number' ? tod : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The current day phase for the bot. Defaults to safe MIDDAY when time is unavailable. */
+export function dayPhaseForBot(bot: mineflayer.Bot): DayPhase {
+  return phaseFor(readTimeOfDay(bot) ?? 6000);
+}
+
+/** Distance to the nearest hostile mob, or Infinity when none is visible. */
+function nearestHostileDist(bot: mineflayer.Bot): number {
+  try {
+    const hostile = (bot as { nearestEntity?: (f: (e: { type?: string; name?: string }) => boolean) => { position?: { x: number; y: number; z: number } } | null })
+      .nearestEntity?.((e) => Boolean(e.type === 'mob' || (e.name && /zombie|skeleton|spider|creeper|slime/.test(e.name))));
+    const p = bot.entity?.position;
+    if (!hostile?.position || !p) return Infinity;
+    const dx = p.x - hostile.position.x;
+    const dy = p.y - hostile.position.y;
+    const dz = p.z - hostile.position.z;
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  } catch {
+    return Infinity;
+  }
+}
+
+function freeInventorySlots(bot: mineflayer.Bot): number {
+  try {
+    const items = bot.inventory?.items?.() ?? [];
+    return Math.max(0, 36 - items.length);
+  } catch {
+    return 36;
+  }
+}
+
+function heldToolDurability(bot: mineflayer.Bot): number {
+  try {
+    const held = (bot as { heldItem?: { durabilityUsed?: number; maxDurability?: number } }).heldItem;
+    const max = held?.maxDurability;
+    if (typeof max === 'number' && max > 0) {
+      const used = typeof held?.durabilityUsed === 'number' ? held.durabilityUsed : 0;
+      return Math.max(0, Math.min(1, 1 - used / max));
+    }
+  } catch {
+    // fall through to full durability
+  }
+  return 1;
+}
+
+/**
+ * Build the L1 drive input from live bot state and arbitrate across the drives.
+ * Returns the drive decision (winner + ranked) so callers can act on the
+ * dominant need. Defensive: missing bot state reads as "safe" (full bars).
+ */
+export function dominantDrive(bot: mineflayer.Bot): DriveDecision {
+  const input: DriveInput = {
+    health: (bot as { health?: number }).health,
+    food: (bot as { food?: number }).food,
+    oxygenLevel: (bot as { oxygenLevel?: number }).oxygenLevel,
+    timeOfDay: readTimeOfDay(bot),
+    nearestHostileDist: nearestHostileDist(bot),
+    freeSlots: freeInventorySlots(bot),
+    toolDurability: heldToolDurability(bot)
+  };
+  const drives = [
+    healthDrive(input),
+    hungerDrive(input),
+    oxygenDrive(input),
+    nightDrive(input),
+    threatDrive(input),
+    inventoryDrive(input),
+    toolDrive(input)
+  ];
+  return arbitrate(drives);
+}
+
+/**
+ * Return a food pre-step (make bread) when a dominant hunger/health need clearly
+ * exceeds the urgency threshold and the planned goal is an unrelated long outdoor
+ * task. Conservative: null unless clearly needed, so safe/window goals are untouched.
+ */
+function drivePreStep(bot: mineflayer.Bot): GoalStep | null {
+  const winner = dominantDrive(bot).winner;
+  if (!winner || winner.urgency <= 0.6) return null;
+  if (winner.id === 'hunger' || winner.id === 'health') {
+    return makeFoodStep('bread', 1);
+  }
+  // Oxygen has no deterministic pre-step available here — stay conservative.
+  return null;
+}
+
+/** Dusk refusal message for an outdoor goal, or null when it is still safe to start. */
+function duskRefusal(bot: mineflayer.Bot, goal: string): string | null {
+  const timeOfDay = readTimeOfDay(bot);
+  if (typeof timeOfDay !== 'number') return null; // unknown time — do not refuse
+  // Only the pre-dusk / late-day window is at risk; the safe day window is untouched.
+  if (!duskPreemptActive(timeOfDay)) return null;
+  if (returnByDuskDeadline(timeOfDay, 10)) return null; // enough daylight left — safe window
+  return `Too late in the day to start ${goal}; the dusk clock requires returning to base before nightfall (phase: ${phaseFor(timeOfDay)}).`;
+}
+
+/** Annotate a successful plan with the current day phase and rhythm recommendations. */
+function annotateDayPhase(plan: Extract<GoalPlan, { ok: true }>, bot: mineflayer.Bot): GoalPlan {
+  const phase = dayPhaseForBot(bot);
+  return { ...plan, dayPhase: phase, suggestedActivities: suggestedActivities(phase) };
+}
+
+// ---------------------------------------------------------------------------
 // Goal planning: turn free-text goal into an ordered GoalSpec
 // ---------------------------------------------------------------------------
 
@@ -1136,6 +1303,13 @@ export interface GoalPlanOpts {
   d?: number;
   target?: number;
   bot: mineflayer.Bot;
+  /**
+   * Optional handle for dispatching low-level actions through the hidden
+   * 'primal' tools (via `callPrimal`). When provided, the built goal steps
+   * route their micro-actions through it instead of driving the bot directly.
+   * Backward compatible: omitted for direct-bot steps.
+   */
+  dispatch?: PrimalDispatch;
 }
 
 export type GoalPlan =
@@ -1144,8 +1318,39 @@ export type GoalPlan =
       steps: GoalStep[];
       goalName: string;
       build?: { templateName: string; anchor: { x: number; y: number; z: number }; w?: number; d?: number };
+      dayPhase?: string;
+      suggestedActivities?: string[];
+      mining?: { strategy: 'branch'; yLevels: number[]; plan: BranchMinePlan; spacing: number };
+      exploration?: { recommended: string; ucbScore: number };
     }
   | { ok: false; error: string };
+
+/** Build the UCB exploration annotation for a repeated gather/harvest goal. */
+function explorationFor(goalName: string, recommended: string): { recommended: string; ucbScore: number } {
+  const visits = goalVisitCounts.get(goalName) ?? 0;
+  const ucbScore = 1.0 + ucbBonus(visits, 50, 2);
+  goalVisitCounts.set(goalName, visits + 1);
+  return { recommended, ucbScore };
+}
+
+/** Strip ore prefixes/suffixes (deepslate_*, *_ore) to get the base ore name. */
+function oreBaseName(itemName: string): string {
+  return itemName.toLowerCase().replace(/^(deepslate_|nether_)?(.*)_ore$/, '$2');
+}
+
+/** Build the branch-mining annotation for an ore collect goal. */
+function branchMiningFor(
+  bot: mineflayer.Bot,
+  itemName: string
+): { strategy: 'branch'; yLevels: number[]; plan: BranchMinePlan; spacing: number } {
+  const pos = bot.entity?.position;
+  const origin: BlockPos = pos
+    ? { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) }
+    : { x: 0, y: 64, z: 0 };
+  const yLevels = knownGoodLevels(oreBaseName(itemName));
+  const plan = planBranchMine(origin);
+  return { strategy: 'branch', yLevels, plan, spacing: DEFAULT_BRANCH_SPACING };
+}
 
 /**
  * Parse a goal sentence into an ordered list of goal steps. Steps are ordered so
@@ -1182,12 +1387,12 @@ export function planGoal(text: string, opts: GoalPlanOpts): GoalPlan {
       z: opts.z !== undefined ? Math.floor(opts.z) : anchorZ
     };
 
-    return {
+    return annotateDayPhase({
       ok: true,
       goalName: `build ${templateName}`,
       steps: [buildStep({ templateName, anchor, w: opts.w, d: opts.d })],
       build: { templateName, anchor, w: opts.w, d: opts.d }
-    };
+    }, opts.bot);
   }
 
   const wantsBread = lower.includes('bread');
@@ -1197,39 +1402,61 @@ export function planGoal(text: string, opts: GoalPlanOpts): GoalPlan {
     const parsed = lower.match(/(?:collect|gather)\s+(\d+)\s+([a-z_]+)/);
     const itemName = parsed ? parsed[2] : lower.replace(/^.*(?:collect|gather)\s+/, '').trim();
     const targetCount = opts.target ?? (parsed ? parseInt(parsed[1], 10) : 16);
-    if (!SOURCE_BLOCKS[itemName]) {
+    const sourceKey = SOURCE_BLOCKS[itemName] ? itemName : oreBaseName(itemName);
+    if (!SOURCE_BLOCKS[sourceKey]) {
       return { ok: false, error: `No known source block for ${itemName}.` };
     }
-    return {
-      ok: true,
-      goalName: `collect ${targetCount} ${itemName}`,
-      steps: [gatherItemStep(itemName, targetCount)]
-    };
+    const goalName = `collect ${targetCount} ${itemName}`;
+    const dusk = duskRefusal(opts.bot, goalName);
+    if (dusk) return { ok: false, error: dusk };
+    const steps: GoalStep[] = [];
+    const pre = drivePreStep(opts.bot);
+    if (pre) steps.push(pre);
+    steps.push(gatherItemStep(itemName, targetCount, { dispatch: opts.dispatch }));
+    const ok: Extract<GoalPlan, { ok: true }> = { ok: true, goalName, steps };
+    if (knownGoodLevels(oreBaseName(itemName)).length > 0) {
+      ok.mining = branchMiningFor(opts.bot, itemName);
+    } else {
+      ok.exploration = explorationFor(goalName, `continue to gather ${itemName}`);
+    }
+    return annotateDayPhase(ok, opts.bot);
   }
 
   if (wantsBread) {
     if (wantsCrops) {
-      return {
-        ok: true,
-        goalName: 'harvest crops and make bread',
-        steps: [harvestCropsStep(), makeFoodStep('bread', 1), deliverItemStep('bread', 1)]
-      };
+      const dusk = duskRefusal(opts.bot, 'harvest crops and make bread');
+      if (dusk) return { ok: false, error: dusk };
+      const steps: GoalStep[] = [];
+      const pre = drivePreStep(opts.bot);
+      if (pre) steps.push(pre);
+      steps.push(harvestCropsStep(), makeFoodStep('bread', 1), deliverItemStep('bread', 1));
+      const ok: Extract<GoalPlan, { ok: true }> = { ok: true, goalName: 'harvest crops and make bread', steps };
+      ok.exploration = explorationFor('harvest crops and make bread', 'continue harvesting crops for bread');
+      return annotateDayPhase(ok, opts.bot);
     }
     // make bread (a no-op when bread already exists), then deliver it
-    return {
+    return annotateDayPhase({
       ok: true,
       goalName: 'make and deliver bread',
       steps: [makeFoodStep('bread', 1), deliverItemStep('bread', 1)]
-    };
+    }, opts.bot);
   }
 
   if (wantsCrops) {
-    return { ok: true, goalName: 'harvest crops', steps: [harvestCropsStep()] };
+    const dusk = duskRefusal(opts.bot, 'harvest crops');
+    if (dusk) return { ok: false, error: dusk };
+    const steps: GoalStep[] = [];
+    const pre = drivePreStep(opts.bot);
+    if (pre) steps.push(pre);
+    steps.push(harvestCropsStep());
+    const ok: Extract<GoalPlan, { ok: true }> = { ok: true, goalName: 'harvest crops', steps };
+    ok.exploration = explorationFor('harvest crops', 'continue harvesting crops');
+    return annotateDayPhase(ok, opts.bot);
   }
 
   // Defensive: barricade against nearby enemies.
   if (lower.includes('barricade') || lower.includes('shield') || lower.includes('defend') || lower.includes('protect')) {
-    return { ok: true, goalName: 'barricade', steps: [barricadeStep()] };
+    return annotateDayPhase({ ok: true, goalName: 'barricade', steps: [barricadeStep()] }, opts.bot);
   }
 
   // Trade with a villager for an item.
@@ -1241,7 +1468,7 @@ export function planGoal(text: string, opts: GoalPlanOpts): GoalPlan {
       .trim()
       .replace(/[^a-z_]+/g, '_')
       .replace(/^_+|_+$/g, '');
-    return { ok: true, goalName: `trade for ${item || 'item'}`, steps: [tradeWithVillagerStep(item || 'bread', 1)] };
+    return annotateDayPhase({ ok: true, goalName: `trade for ${item || 'item'}`, steps: [tradeWithVillagerStep(item || 'bread', 1)] }, opts.bot);
   }
 
   // Get an item from a chest.
@@ -1253,7 +1480,7 @@ export function planGoal(text: string, opts: GoalPlanOpts): GoalPlan {
       .trim()
       .replace(/[^a-z_]+/g, '_')
       .replace(/^_+|_+$/g, '');
-    return { ok: true, goalName: `get ${item || 'item'} from chest`, steps: [openChestStep(item || 'wheat', 1)] };
+    return annotateDayPhase({ ok: true, goalName: `get ${item || 'item'} from chest`, steps: [openChestStep(item || 'wheat', 1)] }, opts.bot);
   }
 
   // General deliver: "give/drop/gimme/hand <item>" (optional count). Delivers
@@ -1272,11 +1499,11 @@ export function planGoal(text: string, opts: GoalPlanOpts): GoalPlan {
       .replace(/^_+|_+$/g, '');
     const count = counted ? parseInt(counted[1], 10) : 1;
     if (itemName && itemName.length > 0 && itemName !== 'me') {
-      return {
+      return annotateDayPhase({
         ok: true,
         goalName: `deliver ${count} ${itemName}`,
         steps: [deliverItemStep(itemName, count)]
-      };
+      }, opts.bot);
     }
   }
 
@@ -1311,7 +1538,10 @@ export function registerTaskRunnerTools(factory: ToolFactory, getBot: () => mine
     }) => {
       const text = goal.trim().toLowerCase();
       const bot = getBot();
-      const plan = planGoal(text, { template, x, y, z, w, d, target, bot });
+      const plan = planGoal(text, {
+        template, x, y, z, w, d, target, bot,
+        dispatch: makePrimalDispatcher(factory)
+      });
 
       if (!plan.ok) {
         return factory.createErrorResponse(plan.error);

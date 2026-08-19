@@ -1,6 +1,6 @@
 import test from 'ava';
 import sinon from 'sinon';
-import { ToolFactory } from '../src/tool-factory.js';
+import { ToolFactory, makePrimalDispatcher } from '../src/tool-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { BotConnection } from '../src/bot-connection.js';
 
@@ -319,4 +319,47 @@ test('callPrimal returns an error response for an unknown primal tool', async (t
   const response = await factory.callPrimal('does-not-exist', {});
   t.is(response.isError, true);
   t.true(response.content[0].text.includes('Unknown primal tool: does-not-exist'));
+});
+
+// ---------------------------------------------------------------------------
+// makePrimalDispatcher — the live seam the task-runner uses to invoke hidden
+// primal tools through callPrimal.
+// ---------------------------------------------------------------------------
+
+test('makePrimalDispatcher invokes the executor of a registered hidden tool and returns its result', async (t) => {
+  const { factory } = makeVisibilityHarness();
+  const executor = sinon.stub().resolves({
+    content: [{ type: 'text', text: 'Collected 32/32 wood after 1 digs' }]
+  });
+  factory.registerTool('collect-item', 'Hidden gather', {}, executor, { visibility: 'primal' });
+
+  const dispatch = makePrimalDispatcher(factory);
+  const result = await dispatch('collect-item', { itemName: 'wood', count: 32 });
+
+  t.true(result.ok);
+  t.is(result.text, 'Collected 32/32 wood after 1 digs');
+  t.true((executor as sinon.SinonStub).calledOnceWith({ itemName: 'wood', count: 32 }));
+});
+
+test('makePrimalDispatcher reports ok:false for an unknown tool name', async (t) => {
+  const { factory } = makeVisibilityHarness();
+  const dispatch = makePrimalDispatcher(factory);
+  const result = await dispatch('does-not-exist', {});
+  t.false(result.ok);
+  t.true(result.text.includes('Unknown primal tool: does-not-exist'));
+});
+
+test('makePrimalDispatcher reports ok:false when the executor throws', async (t) => {
+  const { factory } = makeVisibilityHarness();
+  factory.registerTool(
+    'boom-tool',
+    'Hidden',
+    {},
+    sinon.stub().rejects(new Error('explosion')),
+    { visibility: 'primal' }
+  );
+  const dispatch = makePrimalDispatcher(factory);
+  const result = await dispatch('boom-tool', {});
+  t.false(result.ok);
+  t.true(result.text.includes('explosion'));
 });
